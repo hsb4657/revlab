@@ -11,10 +11,13 @@
   <div class="logo">REV<span>Lab</span></div>
   <nav>
     <button class="nav-btn active" data-view="samples">样本库</button>
+    <button class="nav-btn" data-view="ue">UE 引擎</button>
+    <button class="nav-btn" data-view="unity">Unity 引擎</button>
     <button class="nav-btn" data-view="workflows">工作流</button>
     <button class="nav-btn" data-view="sandbox">反汇编/网络</button>
     <button class="nav-btn" data-view="ai">AI 模型</button>
     <button class="nav-btn" data-view="mcp">MCP 接入</button>
+    <button class="nav-btn" data-view="settings">设置</button>
   </nav>
   <div id="sys-status"></div>
 </header>
@@ -57,6 +60,62 @@
       </tr></thead>
       <tbody></tbody>
     </table>
+  </section>
+
+  <!-- ==================== UE 虚幻引擎 ==================== -->
+  <section id="view-ue" class="view">
+    <h2>虚幻引擎(UE) Dump 专项分析</h2>
+    <p class="hint">基于通用引擎工作流:版本识别 → 关键源码 → 三大件定位(GObjects/GNames/GWorld/GEngine)→ 反射系统 → 加密解密 → 报告。</p>
+    <div class="card">
+      <h3>输入与启动</h3>
+      <div class="row">
+        <label>UE 版本 <select id="ue-version"></select></label>
+        <label>目标样本 ID <input id="ue-sample-id" style="width:140px" placeholder="当前样本 #id"></label>
+        <label>或上传 dump exe <input type="file" id="ue-dump-file"></label>
+        <button id="btn-ue-analyze" class="primary">▶ 分析</button>
+        <span id="ue-status"></span>
+      </div>
+      <div id="ue-version-info" class="kv"></div>
+    </div>
+    <div id="ue-result" class="hidden card">
+      <h3>分析结果</h3>
+      <div id="ue-stage-flow" class="eng-flow"></div>
+      <div id="ue-result-body"></div>
+    </div>
+    <div class="card">
+      <h3>历史记录</h3>
+      <table>
+        <thead><tr><th>ID</th><th>目标</th><th>版本</th><th>状态</th><th>时间</th><th>操作</th></tr></thead>
+        <tbody id="ue-history"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ==================== Unity 引擎 ==================== -->
+  <section id="view-unity" class="view">
+    <h2>Unity 引擎 分析</h2>
+    <p class="hint">针对游戏安装目录:扫描 → 版本识别 → 构建类型(Mono/IL2CPP)→ 程序集 → 资源 → 字符串 → 解密 → SDK → 报告。</p>
+    <div class="card">
+      <h3>输入与启动</h3>
+      <div class="row">
+        <label style="flex:1">游戏文件夹绝对路径 <input id="unity-target" style="flex:1" placeholder="C:\Games\MyGame"></label>
+        <label>版本(可选) <input id="unity-version" style="width:150px" placeholder="如 2021.3.0f1"></label>
+        <button id="btn-unity-analyze" class="primary">▶ 分析</button>
+        <span id="unity-status"></span>
+      </div>
+    </div>
+    <div id="unity-result" class="hidden card">
+      <h3>分析结果</h3>
+      <div id="unity-stage-flow" class="eng-flow"></div>
+      <div id="unity-result-body"></div>
+    </div>
+    <div class="card">
+      <h3>历史记录</h3>
+      <table>
+        <thead><tr><th>ID</th><th>目标</th><th>版本</th><th>状态</th><th>时间</th><th>操作</th></tr></thead>
+        <tbody id="unity-history"></tbody>
+      </table>
+    </div>
   </section>
 
   <!-- ==================== 自定义工作流 ==================== -->
@@ -164,6 +223,21 @@
         <thead><tr><th>工具</th><th>说明</th></tr></thead>
         <tbody id="mcp-tools"></tbody>
       </table>
+    </div>
+  </section>
+  <!-- ==================== 设置 ==================== -->
+  <section id="view-settings" class="view">
+    <h2>全局设置</h2>
+    <p class="hint">配置分析产物(报告 / 抓包 / 脱壳产物 / Unity SDK)的输出目录。保存后对新任务生效。</p>
+    <div class="card">
+      <h3>分析输出目录</h3>
+      <div class="row">
+        <label>输出根目录</label>
+        <input id="set-output-dir" style="flex:1" placeholder="D:\revlab-output">
+        <button id="btn-set-save" class="primary">保存</button>
+        <span id="set-status"></span>
+      </div>
+      <p class="hint">例如 <code>D:\revlab-output</code>,产物将写入其下 <code>reports/</code>、<code>captures/</code>、<code>unpacked/</code>、<code>sdk/</code>、<code>workspace/</code> 子目录。留空使用项目根目录。</p>
     </div>
   </section>
 </main>

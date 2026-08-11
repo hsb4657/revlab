@@ -21,6 +21,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.on_event("startup")
 def _startup():
     init_db()
+    from .services.settings import apply_settings
+    apply_settings()
     from .services.workflow import init_default_workflows
     init_default_workflows()
 

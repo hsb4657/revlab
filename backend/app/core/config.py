@@ -4,15 +4,17 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[3]  # 项目根目录
 DATA_DIR = BASE_DIR / "data"
 SAMPLES_DIR = BASE_DIR / "samples"
-REPORTS_DIR = BASE_DIR / "reports"
-CAPTURES_DIR = BASE_DIR / "captures"
-UNPACKED_DIR = BASE_DIR / "unpacked"
+OUTPUT_ROOT = Path(os.environ.get("REVLAB_OUTPUT_DIR", str(BASE_DIR)))  # 分析产物根目录(可配置)
+REPORTS_DIR = OUTPUT_ROOT / "reports"
+CAPTURES_DIR = OUTPUT_ROOT / "captures"
+UNPACKED_DIR = OUTPUT_ROOT / "unpacked"
+SDK_DIR = OUTPUT_ROOT / "sdk"
 GHIDRA_DIR = BASE_DIR / "ghidra"
 TOOLS_DIR = BASE_DIR / "tools"
 WORKSPACE_DIR = BASE_DIR / "workspace"
 
 for _d in (DATA_DIR, SAMPLES_DIR, REPORTS_DIR, CAPTURES_DIR, UNPACKED_DIR,
-           GHIDRA_DIR, TOOLS_DIR, WORKSPACE_DIR):
+           GHIDRA_DIR, TOOLS_DIR, WORKSPACE_DIR, SDK_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 DB_PATH = DATA_DIR / "revlab.db"
@@ -20,14 +22,31 @@ SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # 200MB 样本上限
 
+
+def _apply_output_root(root: Path):
+    """运行时切换分析产物输出目录。"""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    Config.REPORTS_DIR = root / "reports"
+    Config.CAPTURES_DIR = root / "captures"
+    Config.UNPACKED_DIR = root / "unpacked"
+    Config.SDK_DIR = root / "sdk"
+    Config.WORKSPACE_DIR = root / "workspace"
+    for _d in (Config.REPORTS_DIR, Config.CAPTURES_DIR, Config.UNPACKED_DIR,
+               Config.SDK_DIR, Config.WORKSPACE_DIR):
+        _d.mkdir(parents=True, exist_ok=True)
+
+
 # 分析引擎开关(可被环境变量覆盖)
 class Config:
     BASE_DIR = BASE_DIR
     DATA_DIR = DATA_DIR
     SAMPLES_DIR = SAMPLES_DIR
+    OUTPUT_ROOT = OUTPUT_ROOT
     REPORTS_DIR = REPORTS_DIR
     CAPTURES_DIR = CAPTURES_DIR
     UNPACKED_DIR = UNPACKED_DIR
+    SDK_DIR = SDK_DIR
     GHIDRA_DIR = GHIDRA_DIR
     TOOLS_DIR = TOOLS_DIR
     WORKSPACE_DIR = WORKSPACE_DIR

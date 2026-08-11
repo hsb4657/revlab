@@ -294,3 +294,171 @@ def ai_summarize(sample_id: int, payload: dict = None, db: Session = Depends(get
         return {"reply": ai.summarize_sample(sdict, prompt)}
     except Exception as e:
         raise HTTPException(502, str(e))
+
+
+# ================================================================ UE 虚幻引擎分析
+@router.get("/ue/versions")
+def ue_versions():
+    from ..services.ue.versions import all_versions, UE_VERSIONS
+    return [{"version": v, **{k: x for k, x in UE_VERSIONS[v].items() if k != "sources"}}
+            for v in all_versions()]
+
+
+@router.get("/ue/version/{ver}")
+def ue_version_detail(ver: str):
+    from ..services.ue.versions import get_version, FNAME_DETAILS
+    v = get_version(ver)
+    if not v:
+        raise HTTPException(404, "version not in knowledge base")
+    return {**v, "fname_detail": FNAME_DETAILS.get(v["fname"])}
+
+
+@router.get("/ue/signatures")
+def ue_signatures(ver: str = Query("", description="按版本过滤")):
+    from ..services.ue.signatures import all_signatures, signatures_for_version
+    return signatures_for_version(ver) if ver else all_signatures()
+
+
+@router.post("/ue/signatures")
+def ue_save_signature(payload: dict):
+    from ..services.ue.signatures import save_custom_signature
+    name = payload.get("name", "").strip()
+    sig = payload.get("signature", "").strip()
+    if not name or not sig:
+        raise HTTPException(400, "name and signature required")
+    return save_custom_signature({"name": name, "signature": sig, "offset": payload.get("offset", 4),
+                                  "rel": payload.get("rel", True), "versions": payload.get("versions", ["custom"]),
+                                  "desc": payload.get("desc", "custom signature")})
+
+
+@router.post("/ue/source/search")
+def ue_source_search(payload: dict):
+    from ..services.ue.source_fetcher import find_version_branch
+    try:
+        return {"ok": True, **find_version_branch(payload.get("version", ""))}
+    except Exception as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/ue/source/fetch")
+def ue_source_fetch(payload: dict):
+    from ..services.ue.source_fetcher import fetch_version_sources
+    try:
+        r = fetch_version_sources(payload.get("version", ""), cache=True)
+        return {"ok": True, **r}
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@router.get("/ue/source/cache")
+def ue_source_cache():
+    from ..services.ue.source_fetcher import cached_sources
+    return cached_sources()
+
+
+@router.post("/ue/analyze/{sample_id}")
+def ue_analyze(sample_id: int, version: str = Query("", description="指定 UE 版本,留空自动识别"),
+               report: bool = Query(True, description="同时生成报告文件")):
+    from ..services.ue.analyzer import analyze_sample, ue_report
+    try:
+        if report:
+            return ue_report(sample_id, version=version)
+        return {"ok": True, "result": analyze_sample(sample_id, version=version)}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+# ================================================================ 全局设置
+@router.get("/settings")
+def settings_get():
+    from ..services.settings import load_settings
+    return load_settings()
+
+
+@router.post("/settings")
+def settings_save(payload: dict):
+    from ..services.settings import save_settings
+    return save_settings(payload)
+
+
+# ================================================================ 引擎专项通用接口(UE/Unity)
+@router.get("/engine/{engine}/spec")
+def engine_spec_api(engine: str):
+    from ..services.engine_runner import engine_spec
+    try:
+        return engine_spec(engine)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/engine/{engine}/analyze")
+def engine_analyze(engine: str, payload: dict):
+    from ..services.engine_runner import start_analysis
+    target_path = payload.get("target_path", "").strip()
+    sample_id = int(payload.get("sample_id", 0) or 0)
+    version = payload.get("version", "") or ""
+    params = payload.get("params") or {}
+    if not target_path:
+        # 支持以 sample_id 作为输入(UE dump exe)
+        from ..core.config import resolve_sample_path
+        db = SessionLocal()
+        try:
+            s = db.query(Sample).filter(Sample.id == sample_id).first()
+        finally:
+            db.close()
+        if not s:
+            raise HTTPException(400, "target_path 或有效 sample_id 必填")
+        target_path = str(resolve_sample_path(s.stored_path))
+        target_name = s.file_name
+    else:
+        from pathlib import Path as P
+        p = P(target_path)
+        if not p.exists():
+            raise HTTPException(404, f"路径不存在: {target_path}")
+        target_name = p.name
+    try:
+        return start_analysis(engine, target_name, target_path, sample_id=sample_id,
+                              version=version, params=params)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.get("/engine/{engine}/analyses")
+def engine_analyses(engine: str):
+    from ..services.engine_runner import list_analyses
+    try:
+        return list_analyses(engine)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.get("/engine/{engine}/analyses/{aid}")
+def engine_analysis_detail(engine: str, aid: int):
+    from ..services.engine_runner import get_analysis
+    a = get_analysis(aid)
+    if not a or a["engine"] != engine:
+        raise HTTPException(404, "not found")
+    return a
+
+
+@router.post("/engine/{engine}/analyses/{aid}/rerun")
+def engine_analysis_rerun(engine: str, aid: int):
+    from ..services.engine_runner import get_analysis, start_analysis, _load_engine
+    a = get_analysis(aid)
+    if not a or a["engine"] != engine:
+        raise HTTPException(404, "not found")
+    _load_engine(engine)
+    return start_analysis(engine, a["target_name"], a["target_path"],
+                          sample_id=a["sample_id"], version=a["version"],
+                          params=(a["result"] or {}).get("_params", {}))
+
+
+@router.delete("/engine/{engine}/analyses/{aid}")
+def engine_analysis_delete(engine: str, aid: int):
+    from ..services.engine_runner import delete_analysis
+    ok = delete_analysis(aid)
+    if not ok:
+        raise HTTPException(404, "not found")
+    return {"ok": True}

@@ -70,3 +70,22 @@ class Workflow(Base):
     enabled = Column(Integer, default=1)
     stages = Column(JSON, default=list)   # [{name, enabled, params:{...}}, ...]
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class EngineAnalysis(Base):
+    """引擎专项分析记录(UE / Unity),支持阶段进度可视化与历史回溯。"""
+    __tablename__ = "engine_analyses"
+
+    id = Column(Integer, primary_key=True)
+    engine = Column(String(16), index=True)          # "ue" / "unity"
+    target_name = Column(String(512), default="")
+    target_path = Column(String(1024), default="")
+    sample_id = Column(Integer, default=0, index=True)
+    version = Column(String(32), default="")
+    status = Column(String(32), default="pending")   # pending/running/done/error
+    stage = Column(String(64), default="")
+    result = Column(JSON, default=dict)              # 分析结果(含 _stages 进度节点)
+    report_paths = Column(JSON, default=dict)
+    error = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

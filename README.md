@@ -14,21 +14,40 @@ REVLab 是一个针对 Windows PE 文件的可视化逆向工程工作流平台,
 
 ## 功能特性
 
-| 模块 | 说明 |
-| --- | --- |
-| 🔍 指纹识别 | MD5 / SHA1 / SHA256 / SHA512 / **imphash** / ssdeep |
-| 🧩 PE 静态解析 | DOS/NT/Optional 头、数据目录、节区表(含 **Shannon 熵**)、导入/导出表、延迟导入、TLS 回调、资源树、Rich Header、PDB 线索、数字签名验证 |
-| 🔐 安全特性 | ASLR / DEP / SEH / CFG / 高熵 VA 等 |
-| 📦 壳检测 | 30+ 特征库:UPX/ASPack/PECompact/Petite/MPRESS/VMProtect/Themida/Armadillo 等(节区名+熵+导入异常+签名字符串) |
-| 📦 脱壳 | 已知壳自动解压(UPX 等)、通用内存转储(PE-sieve 集成)、IAT 修复、原始/脱壳双视图对比 |
-| 🔬 反汇编 | Capstone x86/x64,入口/任意地址反汇编,Call/Jmp 交叉引用 Xref,函数启发式识别 |
-| 🧩 反编译 | Ghidra Headless 集成,导出函数级 C 伪代码 |
-| ⚡ 动态沙箱 | VMware 快照回滚 / 本机受控运行,进程树、文件、注册表、DNS 行为监控 |
-| 🌐 网络抓包 | pktmon 采集 + **自研 pcap 解析**(连接聚合 / DNS / HTTP / TLS-SNI) |
-| 📄 聚合报告 | JSON / HTML / Markdown 多维报告,原始 vs 脱壳对比 |
-| ⚙️ 自定义工作流 | 阶段启停、排序、参数配置,**流水线实时可视化**(状态/耗时/日志),断点续跑 |
-| 🤖 AI 解读 | 接入任意 OpenAI 兼容模型,智能报告解读、逆向问答 |
-| 🔌 MCP Server | 15+ 分析工具,一键接入 Codex / Claude Code / Cursor / 自定义智能体 |
+### 工作流① 通用 PE 逆向(完整)
+- 🔍 指纹识别:MD5 / SHA1 / SHA256 / SHA512 / **imphash** / ssdeep
+- 🧩 PE 静态解析:DOS/NT/Optional 头、数据目录、节区表(含 **Shannon 熵**)、导入/导出表、延迟导入、TLS 回调、资源树、Rich Header、PDB 线索、数字签名验证
+- 🔐 安全特性:ASLR / DEP / SEH / CFG / 高熵 VA 等
+- 📦 壳检测:30+ 特征库(UPX/ASPack/PECompact/Petite/MPRESS/VMProtect/Themida/Armadillo 等)
+- 📦 脱壳:已知壳自动解压(UPX)、通用内存转储(PE-sieve)、IAT 修复
+- 🔬 反汇编:Capstone x86/x64 + Call/Jmp 交叉引用 Xref + 函数启发式识别
+- 🧩 反编译:Ghidra Headless 集成,导出函数级 C 伪代码
+- ⚡ 动态沙箱:VMware 快照回滚 / 本机受控运行,进程树/文件/注册表/DNS 监控
+- 🌐 网络抓包:pktmon 采集 + 自研 pcap 解析(连接聚合/DNS/HTTP/TLS-SNI)
+- ⚙️ 自定义工作流:阶段启停/排序/参数配置,流水线实时可视化,断点续跑
+
+### 工作流② UE 虚幻引擎专项(独立)
+- 🎮 输入 dump 后的 exe,自动/手动识别引擎版本(知识库 4.27 / 5.0~5.5)
+- 📥 源码轻量拉取:按版本在 GitHub 镜像定位分支,raw 拉取少量关键头文件(几 KB,本地缓存,不克隆大仓库)
+- 🗿 **三大件定位**:GNames / GObjects / GWorld / GEngine(特征字节签名扫描 12+ 内置 + 自定义签名 + 源码结构交叉校验)
+- 🔍 **反射系统分析**:UObject/UClass/UFunction/FProperty 反射结构检测、混淆判定、运行时遍历方案
+- 🔐 加密解密:先检测 FName/AES/高熵/壳;**未检测到加密则跳过解密**,检测到才输出 FNamePool 等解密方案
+- 📄 UE 专项报告(HTML/MD/JSON)
+
+### 工作流③ Unity 引擎专项(独立)
+- 📂 输入**游戏文件夹绝对路径**,自主分析
+- 🏗️ 目录扫描 / 版本识别(globalgamemanagers / UnityPlayer.dll / 版本串)/ 构建类型判定(Mono / IL2CPP)
+- 📦 **DLL 程序集分析**:Data/Managed 各 dll(dnfile 解析命名空间/类型/方法,含 Assembly-CSharp.dll 等)+ GameAssembly.dll 分析
+- 🧬 **IL2CPP metadata 分析**:global-metadata.dat(magic 0xFAB11BAF、版本、字符串表)
+- 🔐 **Metadata 自动解密**:魔数恢复 / 常见 XOR / 内存 dump 辅助;检测到加密才解密,未加密直接解析
+- 🛠️ **SDK Dump**(对齐 Il2CppDumper):生成 `Dump.cs` + `script.json` + C++ 头文件(`sdk_cpp/`)+ `sdk.json`
+- 🎨 资源分析(UnityFS/UnityRaw/UnityWeb)+ 关键 API 字符串 + Unity 专项报告
+
+### 通用能力
+- 🤖 AI 解读:接入任意 OpenAI 兼容模型,智能报告解读、逆向问答
+- 🔌 MCP Server:23+ 分析工具,一键接入 Codex / Claude Code / Cursor / 自定义智能体
+- 📂 **输出目录可配置**:报告/抓包/脱壳产物/SDK 可指定输出根目录(设置页)
+- 📄 聚合报告:JSON / HTML / Markdown 多维报告
 
 ## 技术栈
 
@@ -63,11 +82,26 @@ scripts\start.bat
 
 ### 使用流程
 
+**① 通用 PE 分析**
 1. 在「样本库」上传自己的 PE 文件(或使用内置演示样本 `samples\revlab_sample.exe`)
 2. 选择工作流(默认 `full-auto` 全自动),点击「全自动分析」
 3. 观察顶部**流水线实时可视化**(识别 → 脱壳 → 反汇编 → 反编译 → 动态 → 报告)
 4. 查看节区/导入/字符串/安全特性/壳判定,点击「反汇编」查看汇编,「报告」查看聚合报告
-5. 「AI 解读」生成智能分析(需先配置 AI 模型)
+
+**② UE 虚幻引擎专项**
+1. 进入「UE 引擎」页,选择引擎版本(或自动识别)
+2. 上传/选择 dump 后的 exe,点击「▶ 分析」
+3. 观察阶段进度(版本→源码→三大件→反射→加密解密→报告)
+4. 查看三大件地址、反射系统检测、加密/解密结果
+
+**③ Unity 引擎专项**
+1. 进入「Unity 引擎」页,输入游戏文件夹绝对路径
+2. 点击「▶ 分析」,观察 9 阶段进度
+3. 查看版本/构建类型/DLL 程序集/资源/metadata 解密/SDK dump(Dump.cs + C++ 头文件 + JSON)
+
+**通用**
+- 「AI 解读」生成智能分析(需先配置 AI 模型)
+- 「设置」页可指定分析产物输出目录
 
 ### 生成演示样本
 
@@ -136,9 +170,46 @@ args = ["-m", "mcp_server.server", "--port", "8765"]
 
 `Settings → MCP → Add`,类型选 Command,粘贴 `python -m mcp_server.server --port 8765`,或编辑 `.cursor/mcp.json`。
 
-### MCP 工具清单(15 个)
+### MCP 工具清单(23 个)
 
-`analyze_pe` · `get_pe_info` · `list_sections` · `disassemble` · `get_imports_exports` · `extract_strings` · `detect_packer` · `unpack_known` · `decompile_ghidra` · `run_dynamic` · `capture_network` · `generate_report` · `run_pipeline` · `list_samples` · `register_sample`
+**PE 通用**:`analyze_pe` · `get_pe_info` · `list_sections` · `disassemble` · `get_imports_exports` · `extract_strings` · `detect_packer` · `unpack_known` · `decompile_ghidra` · `run_dynamic` · `capture_network` · `generate_report` · `run_pipeline` · `list_samples` · `register_sample`
+
+**UE 引擎**:`ue_versions` · `ue_analyze` · `ue_fetch_source` · `ue_report`
+
+**Unity 引擎**:`unity_analyze` · `unity_status` · `unity_dump_sdk` · `engine_analyses`
+
+## 使用的开源项目 / 参考项目
+
+REVLab 深度使用了以下开源项目,并向其作者致敬:
+
+### 核心依赖(直接使用)
+| 项目 | 用途 |
+| --- | --- |
+| [FastAPI](https://github.com/fastapi/fastapi) + [Uvicorn](https://github.com/encode/uvicorn) | Web 后端框架 |
+| [pefile](https://github.com/erocarrera/pefile) | PE 文件解析(导入表/imphash 等) |
+| [LIEF](https://github.com/lief-project/LIEF) | PE 交叉解析与重建 |
+| [Capstone](https://github.com/capstone-engine/capstone) | x86/x64 反汇编引擎 |
+| [SQLAlchemy](https://github.com/sqlalchemy/sqlalchemy) | ORM + SQLite 持久化 |
+| [mcp (Python SDK)](https://github.com/modelcontextprotocol/python-sdk) / FastMCP | MCP Server 实现 |
+| [psutil](https://github.com/giampaolo/psutil) | 进程树/行为监控 |
+| [dnfile](https://github.com/malcharl/dnfile) | .NET 程序集(Unity Mono 模式)元数据解析 |
+
+### 外部工具(可选,脚本自动下载)
+| 项目 | 用途 |
+| --- | --- |
+| [Ghidra](https://github.com/NationalSecurityAgency/ghidra) | Headless 反编译(需 Java 21) |
+| [PE-sieve](https://github.com/hasherezade/pe-sieve) | 进程内存转储 + IAT 修复(通用脱壳) |
+| [UPX](https://github.com/upx/upx) | UPX 壳解压 |
+
+### 参考项目(功能/签名/输出格式参考,致敬其工作)
+| 项目 | 参考内容 |
+| --- | --- |
+| [Il2CppDumper](https://github.com/Perfare/Il2CppDumper) | Unity SDK dump 输出格式(Dump.cs / script.json)对齐参考 |
+| [UnrealDumper](https://github.com/nneonneo/UnrealDumper) | UE 三大件(GNames/GObjects/GWorld)定位思路参考 |
+| [UE4Dumper](https://github.com/kp7742/UE4Dumper) | UE 三大件特征签名与结构偏移参考 |
+| [Wireshark](https://www.wireshark.org/) | pcap 格式规范参考(本项目为自研解析,不依赖) |
+
+> 注:UE/Unity 引擎本身的源码与二进制为 Epic Games / Unity Technologies 版权所有。本项目仅基于公开的逆向工程社区知识与合规测试目的进行交互分析,不包含引擎源码。
 
 ## 目录结构
 
@@ -146,19 +217,23 @@ args = ["-m", "mcp_server.server", "--port", "8765"]
 revlab/
 ├── backend/            # FastAPI 后端 + 分析引擎
 │   └── app/
-│       ├── api/        # REST API
-│       ├── core/       # 配置/数据库
-│       ├── models/     # SQLAlchemy 模型
-│       ├── services/   # 分析引擎(PE/壳/反汇编/沙箱/pcap/Ghidra/AI/报告)
-│       └── orchestrator/  # 流水线状态机编排
-├── mcp_server/         # MCP Server(FastMCP)
-├── frontend/           # Web UI(纯静态)
+│       ├── api/        # REST API(PE / UE / Unity / 工作流 / AI / 设置)
+│       ├── core/       # 配置/数据库(输出目录可配置)
+│       ├── models/     # SQLAlchemy 模型(含 EngineAnalysis 引擎分析记录)
+│       ├── services/   # 分析引擎
+│       │   ├── ue/         # UE 虚幻引擎专项(版本/签名/源码轻量拉取/分析器)
+│       │   ├── unity/      # Unity 专项(检测/程序集/il2cpp/metadata解密/SDK dump)
+│       │   └── ...         # PE/壳/反汇编/沙箱/pcap/Ghidra/AI/报告/引擎执行器
+│       └── orchestrator/   # 通用 PE 流水线状态机编排
+├── mcp_server/         # MCP Server(FastMCP,23 工具)
+├── frontend/           # Web UI(纯静态:样本库/UE/Unity/工作流/反汇编/AI/MCP/设置)
 ├── ghidra/scripts/     # Ghidra 反编译导出脚本
-├── samples/            # 演示样本 + 构造器
+├── samples/            # 演示样本 + 构造器(PE/UE/Unity)
 ├── scripts/            # 启动/工具下载脚本
-├── data/               # SQLite 数据库(运行时生成,git 忽略)
-├── reports/            # 分析报告(运行时生成,git 忽略)
-└── captures/           # 抓包 pcap(运行时生成,git 忽略)
+├── data/               # SQLite 数据库/设置(运行时生成,git 忽略)
+├── reports/            # 分析报告(pe/ue/unity,运行时生成,git 忽略)
+├── captures/           # 抓包 pcap(运行时生成,git 忽略)
+└── sdk/                # Unity SDK dump(运行时生成,git 忽略)
 ```
 
 ## API 概览
@@ -166,12 +241,16 @@ revlab/
 | 端点 | 说明 |
 | --- | --- |
 | `POST /api/samples/upload` | 上传样本 |
-| `POST /api/samples/{id}/analyze?workflow=xx` | 触发工作流分析 |
+| `POST /api/samples/{id}/analyze?workflow=xx` | 触发通用 PE 工作流分析 |
 | `GET /api/samples/{id}/pipeline` | 流水线状态/阶段历史 |
 | `GET /api/samples/{id}/disassembly` | 反汇编 |
 | `GET /api/samples/{id}/report` | 报告(html/json/markdown) |
 | `GET/POST /api/workflows` | 工作流 CRUD |
+| `POST /api/engine/{engine}/analyze` | 引擎专项分析(engine=ue/unity,传 path 或 sample_id) |
+| `GET /api/engine/{engine}/analyses` · `.../analyses/{id}` | 引擎分析历史/详情(含阶段进度) |
+| `GET /api/ue/versions` · `/api/ue/signatures` | UE 版本知识库 / 签名库 |
 | `GET/POST /api/ai/config` · `/api/ai/summarize/{id}` | AI 配置与解读 |
+| `GET/POST /api/settings` | 全局设置(输出目录) |
 
 完整 API 文档见启动后 **http://127.0.0.1:8000/docs**
 

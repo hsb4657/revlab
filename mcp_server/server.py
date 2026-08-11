@@ -246,6 +246,108 @@ def run_pipeline(sample_id: int) -> str:
     return _j(r)
 
 
+# ================================================================ UE 虚幻引擎分析
+@mcp.tool()
+def ue_versions() -> str:
+    """列出内置 UE 虚幻引擎版本知识库(版本/结构/索引方式)。"""
+    from app.services.ue.versions import all_versions, UE_VERSIONS, FNAME_DETAILS
+    return _j([{"version": v, "engine": UE_VERSIONS[v]["engine"], "family": UE_VERSIONS[v]["family"],
+                "fname": UE_VERSIONS[v]["fname"],
+                "fname_detail": FNAME_DETAILS.get(UE_VERSIONS[v]["fname"]),
+                "note": UE_VERSIONS[v]["note"]} for v in all_versions()])
+
+
+@mcp.tool()
+def ue_analyze(sample_id: int, version: str = "") -> str:
+    """对样本执行 UE 分析:版本识别 → 三大件(GNames/GObjects/GWorld)定位 → FName 解密分析 → 加密检测。version 可选。"""
+    from app.services.ue.analyzer import analyze_sample
+    try:
+        return _j({"ok": True, "result": analyze_sample(sample_id, version=version)})
+    except ValueError as e:
+        return _j({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+def ue_fetch_source(version: str) -> str:
+    """按需拉取指定 UE 版本的关键源码头文件(仅少量小文件,本地缓存),用于结构交叉校验。"""
+    from app.services.ue.source_fetcher import fetch_version_sources
+    try:
+        return _j({"ok": True, **fetch_version_sources(version, cache=True)})
+    except Exception as e:
+        return _j({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+def ue_report(sample_id: int, version: str = "") -> str:
+    """对样本执行 UE 分析并生成报告(JSON/HTML/Markdown)。"""
+    from app.services.ue.analyzer import ue_report
+    try:
+        return _j(ue_report(sample_id, version=version))
+    except ValueError as e:
+        return _j({"ok": False, "error": str(e)})
+
+
+# ================================================================ Unity 引擎分析
+def _trim_result(result: dict) -> dict:
+    """精简引擎分析结果:剔除 _stages/_params 进度与超大字段,保留关键统计。"""
+    r = dict(result or {})
+    r.pop("_stages", None)
+    r.pop("_params", None)
+    keep_keys = ("sdk", "decrypt", "build_type", "unity_version")
+    out = {}
+    for k, v in r.items():
+        if k == "summary":
+            out[k] = v
+        elif isinstance(v, dict):
+            kept = {kk: vv for kk, vv in v.items() if kk in keep_keys}
+            if kept:
+                out[k] = kept
+    return out
+
+
+@mcp.tool()
+def unity_analyze(path: str, version: str = "") -> str:
+    """对游戏目录执行 Unity 分析(版本识别 → 解密 → SDK 统计等)。path 为游戏文件夹绝对路径。"""
+    from app.services.engine_runner import start_analysis
+    p = Path(path)
+    if not p.exists():
+        return _j({"ok": False, "error": "path not found"})
+    r = start_analysis("unity", p.name, str(p), version=version)
+    return _j({"ok": True, "id": r.get("id"), "engine": "unity",
+               "note": "后台执行,可用 unity_status 查询"})
+
+
+@mcp.tool()
+def unity_status(analysis_id: int) -> str:
+    """查询 Unity 分析任务状态与精简结果。"""
+    from app.services.engine_runner import get_analysis
+    a = get_analysis(analysis_id)
+    if a is None:
+        return _j({"ok": False, "error": f"analysis #{analysis_id} not found"})
+    return _j({"id": a["id"], "status": a["status"], "stage": a["stage"],
+               "target_name": a["target_name"], "version": a["version"],
+               "result": _trim_result(a.get("result") or {})})
+
+
+@mcp.tool()
+def unity_dump_sdk(path: str) -> str:
+    """直接对游戏目录执行 SDK 提取(不入库)。path 为游戏文件夹绝对路径。"""
+    from app.services.engine_runner import start_analysis
+    p = Path(path)
+    if not p.exists():
+        return _j({"ok": False, "error": "path not found"})
+    r = start_analysis("unity", p.name, str(p), params={"dump_sdk_only": True})
+    return _j({"ok": True, "id": r.get("id"), "engine": "unity",
+               "note": f"任务已提交,SDK 产出位于配置报告目录 {config.REPORTS_DIR}"})
+
+
+@mcp.tool()
+def engine_analyses(engine: str) -> str:
+    """列出指定引擎的历史分析任务列表(排除 result)。engine 为 ue / unity。"""
+    from app.services.engine_runner import list_analyses
+    return _j(list_analyses(engine))
+
+
 def main():
     ap = argparse.ArgumentParser(description="REVLab MCP Server")
     ap.add_argument("--port", type=int, default=0, help="HTTP 端口(设置则启用 streamable-http,否则 stdio)")
