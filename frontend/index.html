@@ -123,6 +123,11 @@
     <h2>自定义分析工作流</h2>
     <p class="hint">编排分析阶段:启停、排序、配置每阶段参数。可视化流水线将按此顺序执行。</p>
     <div class="card">
+      <h3>图化工作流画布(v3,支持分支/条件/审批/重试)</h3>
+      <p class="hint">使用 Vue Flow 画布编辑器:节点拖拽连线、条件分支、审批节点、失败重试、单节点重跑/跳过。</p>
+      <button id="btn-open-wf-editor" class="primary" onclick="window.open('/wf/', '_blank')">打开画布编辑器 →</button>
+    </div>
+    <div class="card">
       <div class="row">
         <select id="wf-select"></select>
         <button id="btn-wf-new">新建</button>

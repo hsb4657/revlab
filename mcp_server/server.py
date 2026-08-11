@@ -356,8 +356,13 @@ def main():
     if args.stdio or not args.port:
         mcp.run()
     else:
+        from copy import deepcopy
+        s = deepcopy(mcp.settings)
+        s.host = "127.0.0.1"
+        s.port = args.port
+        mcp.settings = s
         print(f"REVLab MCP server listening on http://127.0.0.1:{args.port}/mcp", flush=True)
-        mcp.run(transport="streamable-http", host="127.0.0.1", port=args.port)
+        mcp.run(transport="streamable-http")
 
 
 if __name__ == "__main__":

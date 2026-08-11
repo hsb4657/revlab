@@ -89,3 +89,34 @@ class EngineAnalysis(Base):
     error = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class GraphWorkflow(Base):
+    """图化工作流定义(节点+边+变量,支持分支/条件/并行)。"""
+    __tablename__ = "graph_workflows"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(64), unique=True, index=True)
+    description = Column(String(512), default="")
+    nodes = Column(JSON, default=list)      # [{id,label,type,params,x,y}]
+    edges = Column(JSON, default=list)      # [{id,from,to,condition?,is_default?}]
+    variables = Column(JSON, default=list)  # [{key,name,type,default,required,source_type,source_node_id}]
+    is_builtin = Column(Integer, default=0) # 预置模板(PE全自动/UE/Unity)
+    enabled = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class GraphTask(Base):
+    """图工作流运行实例。"""
+    __tablename__ = "graph_tasks"
+
+    id = Column(Integer, primary_key=True)
+    workflow_id = Column(Integer, index=True)
+    name = Column(String(128), default="")
+    status = Column(String(32), default="pending")   # pending/running/completed/failed/stopped
+    node_states = Column(JSON, default=dict)         # {node_id: {status, outputs, attempts, error, started_at, finished_at}}
+    variables = Column(JSON, default=dict)           # 变量池(用户填参 + 节点输出)
+    error = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

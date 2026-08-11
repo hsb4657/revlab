@@ -29,3 +29,7 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+
+# Vue Flow 工作流编辑器依赖(构建产物 wf-dist 保留,开箱即用)
+frontend/workflow/node_modules/
+frontend/workflow/dist/

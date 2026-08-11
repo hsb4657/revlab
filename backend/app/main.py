@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .api.routes import router as api_router
+from .api.workflow2_routes import router as wf2_router
 from .core.config import BASE_DIR
 from .core.database import init_db
 
@@ -25,13 +26,21 @@ def _startup():
     apply_settings()
     from .services.workflow import init_default_workflows
     init_default_workflows()
+    from .workflow_engine.manager import init_builtin_templates
+    init_builtin_templates()
 
 app.include_router(api_router)
+app.include_router(wf2_router)
 
 # 静态前端
 _frontend = Path(__file__).resolve().parents[2] / "frontend"
+_wfdist = Path(__file__).resolve().parents[2] / "frontend" / "wf-dist"
+
 if _frontend.exists():
     app.mount("/static", StaticFiles(directory=str(_frontend)), name="frontend")
+    # Vue Flow 画布编辑器(独立构建产物)须在根挂载之前注册
+    if _wfdist.exists():
+        app.mount("/wf", StaticFiles(directory=str(_wfdist), html=True), name="wf-editor")
     app.mount("/", StaticFiles(directory=str(_frontend), html=True), name="root")
 else:
     @app.get("/")

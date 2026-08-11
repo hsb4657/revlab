@@ -44,6 +44,7 @@ REVLab 是一个针对 Windows PE 文件的可视化逆向工程工作流平台,
 - 🎨 资源分析(UnityFS/UnityRaw/UnityWeb)+ 关键 API 字符串 + Unity 专项报告
 
 ### 通用能力
+- 🗺️ **图化工作流 v3**(Vue Flow 画布):节点拖拽连线、**条件分支**、**审批节点**、**失败策略**(重试/跳过/终止)、单节点重跑/跳过、变量系统({{var}} 引用)、任务历史;预置模板(PE 全自动 / UE 专项 / Unity 专项)
 - 🤖 AI 解读:接入任意 OpenAI 兼容模型,智能报告解读、逆向问答
 - 🔌 MCP Server:23+ 分析工具,一键接入 Codex / Claude Code / Cursor / 自定义智能体
 - 📂 **输出目录可配置**:报告/抓包/脱壳产物/SDK 可指定输出根目录(设置页)
@@ -118,13 +119,19 @@ powershell -ExecutionPolicy Bypass -File scripts\download_tools.ps1             
 
 ## 自定义工作流
 
-「工作流」页面支持:
-- 勾选启用/禁用各分析阶段
-- 上下移动调整执行顺序
-- 配置每阶段参数(字符串最小长度、指令上限、动态超时、抓包时长等)
-- 创建/保存/删除自定义工作流
+### 图化工作流画布 v3(推荐,浏览器打开 **http://127.0.0.1:8000/wf/**)
+参考 **DeterminFlow / n8n / Temporal / Airflow / LangGraph** 设计的图化引擎:
 
-流水线在「样本库」详情页**实时可视化**:每个阶段显示状态(待执行/执行中/完成/失败/跳过)、耗时与日志,支持断点续跑。
+- **节点拖拽连线**:分析节点(PE识别/壳检测/脱壳/反汇编/字符串/UE分析/Unity分析/SDK dump)+ 控制节点(条件分支/审批/脚本/报告)
+- **条件分支**:如「{{packer_detect.packed}} == true」→ 脱壳,否则走默认分支
+- **审批节点**:运行样本等危险操作前人工确认,可驳回
+- **失败策略**:每节点 `on_fail`(abort/skip/retry)+ `retry_count`
+- **变量系统**:节点输出写入变量池,参数用 `{{var}}` 引用;支持 `AND/OR/NOT` 与比较运算
+- **执行控制**:单节点重跑 / 跳过 / 停止任务,节点状态实时着色
+- **预置模板**:`pe-auto`(识别→壳检测→条件脱壳→反汇编→报告)、`ue-special`、`unity-special`
+
+### 线性工作流(兼容,原「工作流」页)
+- 阶段启停/排序/参数,流水线实时可视化,断点续跑
 
 ## AI 模型接入
 
@@ -246,6 +253,10 @@ revlab/
 | `GET /api/samples/{id}/disassembly` | 反汇编 |
 | `GET /api/samples/{id}/report` | 报告(html/json/markdown) |
 | `GET/POST /api/workflows` | 工作流 CRUD |
+| `GET/POST /api/wf2` · `/api/wf2/spec` | 图化工作流 CRUD / 节点注册表 |
+| `POST /api/wf2/{id}/tasks` · `.../tasks/{tid}/run` | 图工作流任务运行 |
+| `POST /api/wf2/tasks/{tid}/nodes/{nid}/retry` · `/skip` | 单节点重跑/跳过 |
+| `POST /api/wf2/tasks/{tid}/nodes/{nid}/resolve-approval` | 审批决策 |
 | `POST /api/engine/{engine}/analyze` | 引擎专项分析(engine=ue/unity,传 path 或 sample_id) |
 | `GET /api/engine/{engine}/analyses` · `.../analyses/{id}` | 引擎分析历史/详情(含阶段进度) |
 | `GET /api/ue/versions` · `/api/ue/signatures` | UE 版本知识库 / 签名库 |
