@@ -1,0 +1,80 @@
+:root{--bg:#0b0f1a;--panel:#121826;--panel2:#161d30;--border:#252f45;--text:#dbe2f0;--muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--mono:'Cascadia Code',Consolas,monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+header{display:flex;align-items:center;gap:24px;padding:14px 24px;background:var(--panel);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+.logo{font-size:22px;font-weight:800;color:#fff;letter-spacing:1px}
+.logo span{color:var(--accent)}
+nav{display:flex;gap:6px;flex:1}
+.nav-btn{background:none;border:none;color:var(--muted);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px}
+.nav-btn:hover{background:var(--panel2);color:var(--text)}
+.nav-btn.active{background:var(--accent);color:#06121f}
+#sys-status{font-size:12px;color:var(--muted)}
+main{padding:24px;max-width:1400px;margin:0 auto}
+.view{display:none}.view.active{display:block}
+.toolbar{display:flex;gap:12px;align-items:center;margin-bottom:16px}
+button{background:var(--panel2);color:var(--text);border:1px solid var(--border);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:#06121f;border:none;font-weight:600}
+.upload-btn{background:var(--accent);color:#06121f;padding:9px 18px;border-radius:8px;cursor:pointer;font-weight:600}
+.upload-btn input{display:none}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:13px;vertical-align:top}
+th{background:var(--panel2);color:var(--muted);font-weight:600}
+tr:hover td{background:var(--panel2)}
+tr.clickable{cursor:pointer}
+.mono{font-family:var(--mono);font-size:12.5px;line-height:1.5}
+pre.mono{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;overflow:auto;max-height:70vh;white-space:pre}
+.badge{display:inline-block;padding:2px 10px;border-radius:10px;font-size:12px}
+.badge.ok{background:#143a20;color:var(--green)} .badge.bad{background:#3d1d1d;color:var(--red)}
+.badge.warn{background:#3d311d;color:var(--yellow)} .badge.info{background:#16263d;color:var(--accent)}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:20px}
+.panel-head{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wrap}
+.panel-head h2{flex:1;font-size:18px}
+.panel-actions{display:flex;gap:8px}
+.hidden{display:none!important}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px}
+.card h3{color:var(--accent);margin-bottom:10px}
+.row{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.row label{display:flex;align-items:center;gap:6px;color:var(--muted)}
+input,select{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:13px}
+input[type=number]{width:90px}
+h2{color:var(--accent);margin:8px 0 12px}
+h3{color:var(--muted);margin:14px 0 8px;font-size:15px}
+.hint{color:var(--muted);margin-bottom:14px}
+.kv{display:grid;grid-template-columns:200px 1fr;gap:6px 14px;font-size:13px}
+.kv b{color:var(--muted);font-weight:500}
+.sec{background:var(--panel2);border-radius:8px;padding:12px;margin:10px 0}
+.sec-title{color:var(--accent);font-weight:600;margin-bottom:8px}
+.ent{display:inline-block;min-width:60px;text-align:center;border-radius:6px;padding:2px 6px;font-family:var(--mono)}
+.ent.hi{background:#3d1d1d;color:var(--red)} .ent.mid{background:#3d311d;color:var(--yellow)} .ent.lo{background:#143a20;color:var(--green)}
+footer{padding:18px 24px;color:var(--muted);font-size:12px;border-top:1px solid var(--border);margin-top:40px}
+#upload-progress{color:var(--muted);font-size:13px}
+.pkt{display:inline-block;padding:2px 8px;border-radius:6px;background:var(--panel2);margin:2px;font-family:var(--mono);font-size:12px}
+
+/* 工作流可视化 */
+.wf-flow{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:14px 4px;flex-wrap:wrap}
+.wf-node{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;min-width:118px;text-align:center;position:relative;transition:all .2s}
+.wf-node .wf-icon{font-size:22px;margin-bottom:4px}
+.wf-node .wf-name{font-weight:600;font-size:13px;color:var(--text)}
+.wf-node .wf-sub{font-size:11px;color:var(--muted);margin-top:2px}
+.wf-node .wf-time{font-size:11px;color:var(--muted);margin-top:4px}
+.wf-node.pending{opacity:.55}
+.wf-node.running{border-color:var(--accent);box-shadow:0 0 0 2px rgba(88,166,255,.25);animation:pulse 1.4s infinite}
+.wf-node.done{border-color:var(--green);background:#14301f}
+.wf-node.error{border-color:var(--red);background:#3d1d1d}
+.wf-node.skipped{border-color:#3a4152;background:#1a1f2c;opacity:.5;text-decoration:line-through}
+.wf-arrow{display:flex;align-items:center;justify-content:center;padding:0 6px;color:var(--muted);font-size:20px}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(88,166,255,.5)}70%{box-shadow:0 0 0 8px rgba(88,166,255,0)}100%{box-shadow:0 0 0 0 rgba(88,166,255,0)}}
+.wf-log{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px;margin-top:8px;max-height:180px;overflow:auto;font-size:12px}
+
+/* 工作流编辑器 */
+.wf-stage{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:var(--panel2)}
+.wf-stage .order{width:28px;text-align:center;color:var(--muted);font-family:var(--mono)}
+.wf-stage .st-name{font-weight:600;min-width:170px}
+.wf-stage .st-title{color:var(--muted);font-size:12px;flex:1}
+.wf-stage .params{display:flex;gap:8px;align-items:center}
+.wf-stage .params label{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:12px}
+.wf-stage input[type=number]{width:70px}
+.wf-stage input[type=text]{width:120px}
+

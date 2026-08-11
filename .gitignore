@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时数据(本地生成,不入库)
+data/
+reports/
+captures/
+unpacked/
+workspace/
+ghidra/projects/
+ghidra/decomp/
+ghidra/*.log
+*.db
+data/ai_config.json
+
+# 外部工具(体积大,自行下载)
+tools/upx/
+tools/pe-sieve/
+
+# 日志与系统
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

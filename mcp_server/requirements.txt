@@ -1,0 +1,6 @@
+fastmcp>=2.0
+mcp>=1.13
+pefile
+capstone
+lief
+sqlalchemy

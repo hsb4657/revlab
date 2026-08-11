@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>REVLab · Windows PE 逆向工作流</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<header>
+  <div class="logo">REV<span>Lab</span></div>
+  <nav>
+    <button class="nav-btn active" data-view="samples">样本库</button>
+    <button class="nav-btn" data-view="workflows">工作流</button>
+    <button class="nav-btn" data-view="sandbox">反汇编/网络</button>
+    <button class="nav-btn" data-view="ai">AI 模型</button>
+    <button class="nav-btn" data-view="mcp">MCP 接入</button>
+  </nav>
+  <div id="sys-status"></div>
+</header>
+
+<main>
+  <!-- ==================== 样本库 ==================== -->
+  <section id="view-samples" class="view active">
+    <div class="toolbar">
+      <label class="upload-btn">+ 上传样本<input type="file" id="file-input" multiple></label>
+      <select id="upload-workflow" title="分析工作流"></select>
+      <button id="btn-refresh">刷新</button>
+      <span id="upload-progress"></span>
+    </div>
+
+    <div id="sample-detail" class="panel hidden">
+      <div class="panel-head">
+        <h2 id="detail-name"></h2>
+        <span class="badge" id="detail-status"></span>
+        <div class="panel-actions">
+          <button id="btn-analyze" class="primary">▶ 全自动分析</button>
+          <button id="btn-disasm" class="primary">反汇编</button>
+          <button id="btn-report" class="primary">报告</button>
+          <button id="btn-ai" class="primary">AI 解读</button>
+          <button id="btn-del">删除</button>
+        </div>
+      </div>
+      <!-- 工作流可视化 -->
+      <div id="wf-flow-wrap" class="hidden">
+        <h3>分析流水线(实时)</h3>
+        <div id="wf-flow" class="wf-flow"></div>
+        <div id="wf-log" class="wf-log mono hidden"></div>
+      </div>
+      <div id="detail-body"></div>
+    </div>
+
+    <table id="sample-table">
+      <thead><tr>
+        <th>ID</th><th>文件名</th><th>架构</th><th>PE</th><th>壳判定</th>
+        <th>状态</th><th>SHA256</th><th>上传时间</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- ==================== 自定义工作流 ==================== -->
+  <section id="view-workflows" class="view">
+    <h2>自定义分析工作流</h2>
+    <p class="hint">编排分析阶段:启停、排序、配置每阶段参数。可视化流水线将按此顺序执行。</p>
+    <div class="card">
+      <div class="row">
+        <select id="wf-select"></select>
+        <button id="btn-wf-new">新建</button>
+        <button id="btn-wf-save" class="primary">保存</button>
+        <button id="btn-wf-del">删除</button>
+        <button id="btn-wf-toggle">启用/禁用</button>
+        <span id="wf-status"></span>
+      </div>
+      <div class="row">
+        <label>名称 <input id="wf-name" placeholder="my-workflow"></label>
+        <label>描述 <input id="wf-desc" style="width:360px" placeholder="工作流说明"></label>
+      </div>
+      <div id="wf-editor"></div>
+    </div>
+    <div id="wf-preview" class="card">
+      <h3>当前工作流预览</h3>
+      <div id="wf-preview-flow" class="wf-flow"></div>
+    </div>
+  </section>
+
+  <!-- ==================== 反汇编/网络 ==================== -->
+  <section id="view-sandbox" class="view">
+    <h2>反汇编 / 反编译 / 网络流</h2>
+    <p class="hint">在样本库选中样本后,点击「反汇编」或分析完成后在此查看。</p>
+    <div id="disasm-panel" class="hidden">
+      <div class="row">
+        <label>起始地址(VA) <input id="disasm-addr" placeholder="0x401000"></label>
+        <label>指令数 <input id="disasm-n" type="number" value="2000"></label>
+        <button id="btn-go-disasm">跳转</button>
+      </div>
+      <pre id="disasm-out" class="mono"></pre>
+    </div>
+    <div id="decomp-panel" class="hidden">
+      <h3>Ghidra 反编译 <button id="btn-toggle-decomp">显示/隐藏</button></h3>
+      <pre id="decomp-out" class="mono"></pre>
+    </div>
+    <div id="net-panel" class="hidden">
+      <h3>网络流(抓包)</h3>
+      <div id="net-out"></div>
+    </div>
+  </section>
+
+  <!-- ==================== AI 模型 ==================== -->
+  <section id="view-ai" class="view">
+    <h2>AI 模型接入</h2>
+    <p class="hint">配置任意 OpenAI 兼容接口,用于智能报告解读、逆向分析问答。</p>
+    <div class="card">
+      <h3>模型配置</h3>
+      <div class="row"><label><input type="checkbox" id="ai-enabled"> 启用 AI</label></div>
+      <div class="row"><label style="width:140px">Base URL</label><input id="ai-base" style="flex:1" placeholder="https://api.openai.com/v1"></div>
+      <div class="row"><label style="width:140px">API Key</label><input id="ai-key" style="flex:1" type="password" placeholder="sk-..."></div>
+      <div class="row"><label style="width:140px">模型</label><input id="ai-model" placeholder="gpt-4o-mini"></div>
+      <div class="row"><label style="width:140px">Temperature</label><input id="ai-temp" type="number" step="0.1" value="0.2" style="width:90px"></div>
+      <div class="row">
+        <button id="btn-ai-save" class="primary">保存配置</button>
+        <button id="btn-ai-test">测试连接</button>
+        <span id="ai-status"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>分析问答(需先选中样本)</h3>
+      <div class="row">
+        <button id="btn-ai-summarize">智能解读当前样本</button>
+      </div>
+      <div class="row">
+        <input id="ai-prompt" style="flex:1" placeholder="向 AI 提问样本相关问题…">
+        <button id="btn-ai-send">发送</button>
+      </div>
+      <pre id="ai-out" class="mono" style="max-height:400px"></pre>
+    </div>
+  </section>
+
+  <!-- ==================== MCP ==================== -->
+  <section id="view-mcp" class="view">
+    <h2>MCP Server 接入智能体</h2>
+    <p class="hint">REVLab 提供 MCP 服务器,可将全部逆向能力暴露给 Codex / Claude Code / Cursor 等 AI 智能体。</p>
+
+    <div class="card">
+      <h3>① 启动 MCP 服务器</h3>
+      <pre class="mono">python -m mcp_server.server --port 8765</pre>
+      <p>或通过脚本一键启动: <code>scripts\start-mcp.bat</code></p>
+    </div>
+
+    <div class="card">
+      <h3>② 一键接入主流客户端</h3>
+      <div class="row">
+        <button id="btn-cfg-codex">Codex</button>
+        <button id="btn-cfg-claude">Claude Code</button>
+        <button id="btn-cfg-cursor">Cursor</button>
+        <button id="btn-cfg-custom">自定义</button>
+      </div>
+      <pre id="cfg-out" class="mono"></pre>
+    </div>
+
+    <div class="card">
+      <h3>③ MCP 工具清单</h3>
+      <table>
+        <thead><tr><th>工具</th><th>说明</th></tr></thead>
+        <tbody id="mcp-tools"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  REVLab v2.0 — 实验室自研软件合规逆向测试。样本与数据仅在本机处理,无外联。
+</footer>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
