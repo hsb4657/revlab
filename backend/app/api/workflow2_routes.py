@@ -98,16 +98,22 @@ def wf2_get_task(wf_id: int, task_id: int):
 
 
 @router.post("/tasks/{task_id}/nodes/{node_id}/retry")
-def wf2_retry_node(task_id: int, node_id: str):
-    if not retry_node(task_id, node_id):
-        raise HTTPException(404, "task/node not found")
+def wf2_retry_node(task_id: int, node_id: str, expected_attempt_count: int = Query(-1)):
+    r = retry_node(task_id, node_id, expected_attempt_count)
+    if not r.get("ok"):
+        if r.get("code") == 409:
+            raise HTTPException(409, "节点状态已变化,请刷新后重试")
+        raise HTTPException(404, r.get("error", "not found"))
     return {"ok": True}
 
 
 @router.post("/tasks/{task_id}/nodes/{node_id}/skip")
-def wf2_skip_node(task_id: int, node_id: str):
-    if not skip_node(task_id, node_id):
-        raise HTTPException(404, "task/node not found")
+def wf2_skip_node(task_id: int, node_id: str, expected_attempt_count: int = Query(-1)):
+    r = skip_node(task_id, node_id, expected_attempt_count)
+    if not r.get("ok"):
+        if r.get("code") == 409:
+            raise HTTPException(409, "节点状态已变化,请刷新后重试")
+        raise HTTPException(404, r.get("error", "not found"))
     return {"ok": True}
 
 

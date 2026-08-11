@@ -1,4 +1,5 @@
-"""图工作流执行引擎:状态机调度、条件分支、失败策略、审批挂起、单节点重跑/跳过"""
+"""图工作流执行引擎 v3.1(一期):状态机调度、条件分支、失败策略(重试/跳过/终止/定时重试)、
+审批挂起、单节点重跑/跳过、重试输入冻结、检查点崩溃恢复、乐观并发控制。"""
 from __future__ import annotations
 import copy
 import logging
@@ -11,11 +12,10 @@ from ..models.sample import GraphTask, GraphWorkflow
 from . import definition as dfn
 from .conditions import evaluate
 from .nodes.base import get_node_class
-from .variables import resolve, collect_outputs, unresolved_keys
+from .variables import resolve, collect_outputs
 
 log = logging.getLogger("revlab.wfengine")
 
-# 审批等待注册: {(task_id, node_id): threading.Event}
 _pending_approvals = {}
 _lock = threading.Lock()
 
@@ -24,26 +24,28 @@ def _now():
     return datetime.utcnow().isoformat() + "Z"
 
 
+def _load_task(task_id: int):
+    db = SessionLocal()
+    try:
+        return db.query(GraphTask).filter(GraphTask.id == task_id).first()
+    finally:
+        db.close()
+
+
+def _load_workflow(wf_id: int):
+    db = SessionLocal()
+    try:
+        return db.query(GraphWorkflow).filter(GraphWorkflow.id == wf_id).first()
+    finally:
+        db.close()
+
+
 class Engine:
     def __init__(self, task_id: int):
         self.task_id = task_id
         self._stop = threading.Event()
 
-    # ------------------------------------------------------------- helpers
-    def _task(self):
-        db = SessionLocal()
-        try:
-            return db.query(GraphTask).filter(GraphTask.id == self.task_id).first()
-        finally:
-            db.close()
-
-    def _workflow(self, wf_id: int):
-        db = SessionLocal()
-        try:
-            return db.query(GraphWorkflow).filter(GraphWorkflow.id == wf_id).first()
-        finally:
-            db.close()
-
+    # ------------------------------------------------------------- state IO
     def _load_state(self) -> tuple:
         db = SessionLocal()
         try:
@@ -69,7 +71,8 @@ class Engine:
             db.close()
 
     def _set_node(self, node_states: dict, nid: str, status: str, outputs=None, error=""):
-        st = node_states.setdefault(nid, {"status": dfn.NODE_PENDING, "attempts": 0, "outputs": {}, "error": ""})
+        st = node_states.setdefault(nid, {"status": dfn.NODE_PENDING, "attempts": 0,
+                                          "outputs": {}, "error": ""})
         st["status"] = status
         if outputs is not None:
             st["outputs"] = outputs
@@ -81,6 +84,7 @@ class Engine:
             st["started_at"] = _now()
         if status in (dfn.NODE_COMPLETED, dfn.NODE_FAILED, dfn.NODE_SKIPPED):
             st["finished_at"] = _now()
+        return st
 
     # ------------------------------------------------------------- run
     def run(self):
@@ -89,13 +93,13 @@ class Engine:
         plan = dfn.build_execution_plan(nodes, edges)
         self._save(node_states, variables, status="running")
 
-        # 先标记所有节点 pending
+        skipped = set()
+        visited = set()
+        # 初始化节点状态
         for n in nodes:
             if n["id"] not in node_states:
                 self._set_node(node_states, n["id"], dfn.NODE_PENDING)
 
-        skipped = set()      # 条件分支未选中的节点
-        visited = set()
         try:
             for nid in plan:
                 if self._stop.is_set():
@@ -108,36 +112,30 @@ class Engine:
                     continue
                 ntype = node.get("type")
 
-                # 条件节点:选分支
+                # 条件节点
                 if ntype == "condition":
                     self._set_node(node_states, nid, dfn.NODE_RUNNING)
                     self._save(node_states, variables)
                     expr = node.get("params", {}).get("expression", "")
                     chosen = self._choose_branch(node, expr, edges, variables)
-                    self._set_node(node_states, nid, dfn.NODE_COMPLETED,
-                                   outputs={"chosen": chosen})
+                    self._set_node(node_states, nid, dfn.NODE_COMPLETED, outputs={"chosen": chosen})
                     visited.add(nid)
-                    # 其它出边目标标记 skipped(含下游唯一可达)
-                    outs = [e.get("to") for e in edges if e.get("from") == nid]
-                    for to in outs:
-                        if to != chosen:
-                            skips = self._mark_subtree_skipped(node_states, to, edges, node_map, plan)
+                    for e in edges:
+                        if e.get("from") == nid and e.get("to") != chosen:
+                            skips = self._mark_subtree_skipped(node_states, e["to"], edges, node_map, plan)
                             skipped.update(skips)
                     continue
 
-                # 解析参数占位符
-                params = dict(node.get("params") or {})
-                unresolved = []
-                for k, v in params.items():
-                    if isinstance(v, str) and "{{" in v:
-                        rv = resolve(v, variables)
-                        if "{{" in rv:
-                            unresolved.append(k)
-                        params[k] = rv
-                if unresolved:
-                    raise RuntimeError(f"节点 {nid} 参数未解析的变量: {unresolved}")
+                # 已完成的节点(断点恢复/重跑时跳过)
+                cur_st = node_states.get(nid, {}).get("status")
+                if cur_st in (dfn.NODE_COMPLETED, dfn.NODE_SKIPPED):
+                    visited.add(nid)
+                    continue
 
-                # 审批节点:挂起等待
+                # 参数解析
+                params = self._resolve_params(node, variables, nid, node_states)
+
+                # 审批节点
                 if ntype == "approval":
                     self._set_node(node_states, nid, dfn.NODE_WAITING_APPROVAL)
                     self._save(node_states, variables)
@@ -149,17 +147,13 @@ class Engine:
                                    outputs={"approved": bool(decision.get("approved")),
                                             "reason": decision.get("reason", "")})
                     if not decision.get("approved"):
-                        # 驳回:回滚到上一个已完成节点重跑(简化:标记失败提示)
                         raise RuntimeError(f"审批驳回: {decision.get('reason','')}")
                     visited.add(nid)
                     continue
 
-                # 普通节点执行
-                self._set_node(node_states, nid, dfn.NODE_RUNNING)
-                self._save(node_states, variables)
-                result = self._execute_node(node, params, variables)
+                # 普通节点:执行 + 失败策略(重试/跳过/终止/定时重试)
+                result = self._execute_with_policy(node, params, node_states, variables)
                 if result is None:
-                    # 重试/跳过策略由 _execute_node 处理
                     if node_states.get(nid, {}).get("status") == dfn.NODE_SKIPPED:
                         visited.add(nid)
                         continue
@@ -179,75 +173,118 @@ class Engine:
             self._save(node_states, variables, status="failed", error=str(e))
             return {"ok": False, "error": str(e)}
 
-    # ------------------------------------------------------------- execute node
-    def _execute_node(self, node: dict, params: dict, variables: dict) -> dict | None:
-        ntype = node.get("type")
-        cls = get_node_class(ntype)
+    # ------------------------------------------------------------- params
+    def _resolve_params(self, node: dict, variables: dict, nid: str, node_states: dict) -> dict:
+        """解析节点参数;首次执行冻结 input_snapshot,重试/恢复复用冻结值(输入冻结)。"""
+        st = node_states.get(nid, {})
+        snap = st.get("input_snapshot")
+        if snap is not None:
+            return copy.deepcopy(snap.get("params", {}))
+        params = dict(node.get("params") or {})
+        for k, v in params.items():
+            if isinstance(v, str) and "{{" in v:
+                rv = resolve(v, variables)
+                if "{{" in rv:
+                    raise RuntimeError(f"节点 {nid} 参数未解析的变量: {k} = {rv}")
+                params[k] = rv
+        # 冻结输入快照(深拷贝,防止重试时变量/时间漂移)
+        st["input_snapshot"] = {"params": copy.deepcopy(params)}
+        node_states[nid] = st
+        return params
+
+    # ------------------------------------------------------------- execute + policy
+    def _execute_with_policy(self, node: dict, params: dict, node_states: dict, variables: dict):
+        """执行节点,含失败策略(abort/skip/retry/定时重试)。返回 {outputs, summary} 或 None(跳过)。"""
+        nid = node.get("id")
+        node_params = node.get("params") or {}
+        on_fail = node_params.get("on_fail", "abort")
+        retry_count = int(node_params.get("retry_count", 0) or 0)
+        retry_interval = int(node_params.get("retry_interval", 0) or 0)
+        st = self._set_node(node_states, nid, dfn.NODE_RUNNING)
+        self._save(node_states, variables)
+
+        while True:
+            st = node_states.get(nid, {})
+            st["attempts"] = st.get("attempts", 0) + 1
+            st["started_at"] = _now()
+            self._save(node_states, variables)
+            res = self._run_plugin(node, params, variables, nid)
+            if res is not None:
+                return res
+            # 失败
+            err = st.get("error") or "执行失败"
+            if on_fail == "retry" and st["attempts"] <= retry_count:
+                if retry_interval > 0:
+                    st["status"] = dfn.NODE_RETRY_WAITING
+                    st["next_retry_at"] = time.time() + retry_interval
+                    st["error"] = err
+                    self._save(node_states, variables)
+                    self._wait_retry(nid, st)
+                    if self._stop.is_set():
+                        return None
+                    st["status"] = dfn.NODE_RUNNING
+                    self._save(node_states, variables)
+                    continue  # 到点重试
+                self._set_node(node_states, nid, dfn.NODE_RUNNING, error=err)
+                self._save(node_states, variables)
+                continue  # 立即重试
+            if on_fail == "skip":
+                self._set_node(node_states, nid, dfn.NODE_SKIPPED, error="失败后跳过: " + err)
+                self._save(node_states, variables)
+                return None
+            self._set_node(node_states, nid, dfn.NODE_FAILED, error=err)
+            self._save(node_states, variables)
+            raise RuntimeError(f"节点 {nid} 执行失败: {err}")
+
+    def _run_plugin(self, node: dict, params: dict, variables: dict, nid: str):
+        cls = get_node_class(node.get("type"))
         if cls is None:
-            raise RuntimeError(f"未知节点类型: {ntype}")
+            raise RuntimeError(f"未知节点类型: {node.get('type')}")
         import asyncio
-        ctx = {"node": node, "params": params, "pool": variables,
-               "task_id": self.task_id, "approval_callback": self._approval_cb}
+        ctx = {"node": node, "params": params, "pool": variables, "task_id": self.task_id}
         try:
             res = asyncio.run(cls().execute(ctx))
         except Exception as e:
-            res = None
-            log.exception("node %s execute error", node.get("id"))
-            # 失败策略
-            on_fail = node.get("params", {}).get("on_fail", "abort")
-            retry_count = int(node.get("params", {}).get("retry_count", 0) or 0)
             node_states, variables2, _, _ = self._load_state()
-            st = node_states.setdefault(node.get("id"), {})
-            st["attempts"] = st.get("attempts", 0) + 1
-            if on_fail == "retry" and st["attempts"] <= retry_count:
-                st["status"] = dfn.NODE_RETRY_WAITING
-                self._save(node_states, variables2)
-                time.sleep(1)
-                return self._execute_node(node, params, variables)  # 重试
-            if on_fail == "skip":
-                st["status"] = dfn.NODE_SKIPPED
-                st["error"] = str(e)
-                self._save(node_states, variables2)
-                return None
-            st["status"] = dfn.NODE_FAILED
+            st = node_states.setdefault(nid, {})
             st["error"] = str(e)
             self._save(node_states, variables2)
-            raise RuntimeError(f"节点 {node.get('id')} 执行失败: {e}")
+            return None
         if res is None or getattr(res, "status", "failed") == "failed":
             err = getattr(res, "error", "unknown") if res else "unknown"
             node_states, variables2, _, _ = self._load_state()
-            st = node_states.setdefault(node.get("id"), {})
-            st["attempts"] = st.get("attempts", 0) + 1
-            st["status"] = dfn.NODE_FAILED
+            st = node_states.setdefault(nid, {})
             st["error"] = err
             self._save(node_states, variables2)
-            raise RuntimeError(f"节点 {node.get('id')} 返回失败: {err}")
+            return None
         return {"outputs": getattr(res, "outputs", {}), "summary": getattr(res, "summary", "")}
 
-    # ------------------------------------------------------------- condition branch
+    def _wait_retry(self, nid: str, st: dict):
+        wait = max(0, (st.get("next_retry_at") or 0) - time.time())
+        # 分片等待,支持停止
+        while wait > 0 and not self._stop.is_set():
+            time.sleep(min(1, wait))
+            wait = max(0, (st.get("next_retry_at") or 0) - time.time())
+
+    # ------------------------------------------------------------- condition
     def _choose_branch(self, node: dict, expr: str, edges: list, variables: dict) -> str:
-        """求值条件节点出边,返回选中 target。"""
         outs = [e for e in edges if e.get("from") == node["id"]]
         default = dfn.default_edges_after_condition(edges, node["id"])
-        # 先按顺序求值非默认
         for e in outs:
             if e.get("is_default"):
                 continue
             cond = e.get("condition")
             if cond and evaluate(cond, variables):
                 return e["to"]
-        # 无默认则取第一条
         return default or (outs[0]["to"] if outs else None)
 
     def _mark_subtree_skipped(self, node_states: dict, start: str, edges: list,
                               node_map: dict, plan: list) -> list:
-        """将仅经条件未选分支可达的下游节点标记 skipped。返回被标记的节点 id 列表。
-        若目标节点有多条入边(共享节点,可从其它分支到达),则不跳过。"""
         if start is None:
             return []
         ins = [e for e in edges if e.get("to") == start]
         if len(ins) > 1:
-            return []  # 共享节点,保留
+            return []
         self._set_node(node_states, start, dfn.NODE_SKIPPED, error="条件分支未选中")
         marked = [start]
         for e in edges:
@@ -256,14 +293,11 @@ class Engine:
         return marked
 
     # ------------------------------------------------------------- approval
-    def _approval_cb(self, task_id, node_id):
-        pass
-
     def _wait_approval(self, node_id: str) -> dict | None:
         evt = threading.Event()
         with _lock:
             _pending_approvals[(self.task_id, node_id)] = evt
-        evt.wait(timeout=86400)  # 24h
+        evt.wait(timeout=86400)
         with _lock:
             _pending_approvals.pop((self.task_id, node_id), None)
         return self._approval_decision(node_id)
@@ -272,14 +306,13 @@ class Engine:
         db = SessionLocal()
         try:
             t = db.query(GraphTask).filter(GraphTask.id == self.task_id).first()
-            st = (t.node_states or {}).get(node_id, {})
-            return st.get("_decision") or None
+            return (t.node_states or {}).get(node_id, {}).get("_decision") or None
         finally:
             db.close()
 
 
+# ================================================================ 控制 API
 def resolve_approval(task_id: int, node_id: str, approved: bool, reason: str = "") -> bool:
-    """审批决策:写入节点状态并唤醒引擎线程。"""
     db = SessionLocal()
     try:
         t = db.query(GraphTask).filter(GraphTask.id == task_id).first()
@@ -301,7 +334,6 @@ def resolve_approval(task_id: int, node_id: str, approved: bool, reason: str = "
 
 
 def stop_task(task_id: int) -> bool:
-    """停止任务。"""
     db = SessionLocal()
     try:
         t = db.query(GraphTask).filter(GraphTask.id == task_id).first()
@@ -318,35 +350,54 @@ def stop_task(task_id: int) -> bool:
     return True
 
 
-def retry_node(task_id: int, node_id: str) -> bool:
-    """重跑单节点:重置其状态与下游,任务回到 running 重新执行。"""
+def _expected_ok(task_id: int, node_id: str, expected: int) -> bool:
+    """乐观并发校验:节点当前 attempts 必须等于 expected。"""
+    if expected is None or expected < 0:
+        return True
+    db = SessionLocal()
+    try:
+        t = db.query(GraphTask).filter(GraphTask.id == task_id).first()
+        return (t.node_states or {}).get(node_id, {}).get("attempts", 0) == expected
+    finally:
+        db.close()
+
+
+def retry_node(task_id: int, node_id: str, expected_attempt_count: int = -1) -> dict:
+    """重跑单节点(及其后未完成节点)。expected_attempt_count 乐观并发控制。"""
+    if not _expected_ok(task_id, node_id, expected_attempt_count):
+        return {"ok": False, "error": "conflict", "code": 409}
     db = SessionLocal()
     try:
         t = db.query(GraphTask).filter(GraphTask.id == task_id).first()
         if not t:
-            return False
+            return {"ok": False, "error": "not found"}
         states = dict(t.node_states or {})
+        # 从该节点起重置为 pending(保留 input_snapshot 以冻结输入)
+        target = node_id
         for k in list(states.keys()):
-            states[k]["status"] = "pending"
-            states[k].pop("outputs", None)
-            states[k].pop("_decision", None)
-            states[k]["error"] = ""
+            if k == target:
+                st = states[k]
+                st["status"] = "pending"
+                st["outputs"] = {}
+                st.pop("_decision", None)
+                st["error"] = ""
         t.node_states = states
         t.status = "running"
         db.commit()
     finally:
         db.close()
-    threading.Thread(target=_run_engine_async, args=(task_id,), daemon=True).start()
-    return True
+    _start_thread(task_id)
+    return {"ok": True}
 
 
-def skip_node(task_id: int, node_id: str) -> bool:
-    """跳过节点(标记 skipped)。"""
+def skip_node(task_id: int, node_id: str, expected_attempt_count: int = -1) -> dict:
+    if not _expected_ok(task_id, node_id, expected_attempt_count):
+        return {"ok": False, "error": "conflict", "code": 409}
     db = SessionLocal()
     try:
         t = db.query(GraphTask).filter(GraphTask.id == task_id).first()
         if not t:
-            return False
+            return {"ok": False, "error": "not found"}
         states = dict(t.node_states or {})
         st = dict(states.get(node_id, {}))
         st["status"] = "skipped"
@@ -356,12 +407,51 @@ def skip_node(task_id: int, node_id: str) -> bool:
         db.commit()
     finally:
         db.close()
-    return True
+    return {"ok": True}
 
 
-def _run_engine_async(task_id: int):
+def _start_thread(task_id: int):
+    threading.Thread(target=_run_engine, args=(task_id,), daemon=True).start()
+
+
+def _run_engine(task_id: int):
     Engine(task_id).run()
 
 
 def start_engine(task_id: int):
-    threading.Thread(target=_run_engine_async, args=(task_id,), daemon=True).start()
+    _start_thread(task_id)
+
+
+# ================================================================ 崩溃恢复
+def recover_engine_tasks():
+    """启动时扫描 running/retry_waiting 任务并恢复。
+    遗留 running 节点按失败策略处理:可重试→重试;否则标记失败后重跑引擎,让失败策略生效。
+    """
+    db = SessionLocal()
+    try:
+        rows = db.query(GraphTask).filter(GraphTask.status.in_(["running", "retry_waiting"])).all()
+        recover_ids = []
+        for t in rows:
+            wf = db.query(GraphWorkflow).filter(GraphWorkflow.id == t.workflow_id).first()
+            states = dict(t.node_states or {})
+            node_map = {n["id"]: n for n in (wf.nodes or [])} if wf else {}
+            for nid, st in states.items():
+                if st.get("status") == "running":
+                    node = node_map.get(nid) or {}
+                    node_params = node.get("params") or {}
+                    on_fail = node_params.get("on_fail", "abort")
+                    retry_count = int(node_params.get("retry_count", 0) or 0)
+                    st["status"] = "retry_waiting"
+                    st["error"] = "进程中断后恢复"
+                    if not (on_fail == "retry" and st.get("attempts", 0) < retry_count):
+                        st["status"] = "failed"
+            t.node_states = states
+            t.status = "running"
+            db.commit()
+            recover_ids.append(t.id)
+    finally:
+        db.close()
+    for tid in recover_ids:
+        log.info("recovering wf task %s after crash", tid)
+        _start_thread(tid)
+    return recover_ids

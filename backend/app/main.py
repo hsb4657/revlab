@@ -28,6 +28,8 @@ def _startup():
     init_default_workflows()
     from .workflow_engine.manager import init_builtin_templates
     init_builtin_templates()
+    from .workflow_engine.engine import recover_engine_tasks
+    recover_engine_tasks()
 
 app.include_router(api_router)
 app.include_router(wf2_router)
