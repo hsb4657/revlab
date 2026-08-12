@@ -1271,8 +1271,10 @@ class UnityReportNode(BaseNode):
             "workdir": Path(target),
             "output_dir": ctx.get("output_dir"),
         }
-        # 合并画布上 AI 辅助节点(ai_review/ai_analyze)的输出进 Unity 报告
-        ai_review = _pool_val(pool, "ai_review", {})
+        # 合并画布上 AI 辅助节点(unity_ai_assist)的输出进 Unity 报告
+        ai_review = _pool_val(pool, "unity_ai_assist", {})
+        if not isinstance(ai_review, dict) or not ai_review.get("ai_output"):
+            ai_review = _pool_val(pool, "ai_review", {})
         if isinstance(ai_review, dict) and ai_review.get("ai_output"):
             staged["ai_review"] = ai_review
         try:

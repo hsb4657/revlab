@@ -169,8 +169,11 @@ def _generic_ai_html(analysis: dict) -> str:
     """通用 AI 节点输出(ai_outputs)HTML 段。"""
     outputs = dict(((analysis.get("workflow") or {}).get("ai_outputs") or {}))
     unity = analysis.get("unity") or {}
-    if isinstance(unity, dict) and unity.get("ai_review"):
-        outputs["unity_ai_review"] = unity["ai_review"]
+    if isinstance(unity, dict):
+        if unity.get("ai_review"):
+            outputs["unity_ai_review"] = unity["ai_review"]
+        if unity.get("ai_assist"):
+            outputs["unity_ai_assist"] = unity["ai_assist"]
     if not isinstance(outputs, dict) or not outputs:
         return ""
     body = ['<h2>AI 辅助分析输出</h2>']
@@ -238,8 +241,11 @@ def _ai_assist_markdown(ue: dict) -> list:
 def _generic_ai_markdown(analysis: dict) -> list:
     outputs = dict(((analysis.get("workflow") or {}).get("ai_outputs") or {}))
     unity = analysis.get("unity") or {}
-    if isinstance(unity, dict) and unity.get("ai_review"):
-        outputs["unity_ai_review"] = unity["ai_review"]
+    if isinstance(unity, dict):
+        if unity.get("ai_review"):
+            outputs["unity_ai_review"] = unity["ai_review"]
+        if unity.get("ai_assist"):
+            outputs["unity_ai_assist"] = unity["ai_assist"]
     if not isinstance(outputs, dict) or not outputs:
         return []
     out = ["\n## AI 辅助分析输出\n"]
