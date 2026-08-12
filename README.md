@@ -24,6 +24,8 @@ REVLab 是一个针对 Windows PE、UE 与 Unity 样本的可视化分析工作�
 - 🧩 反编译:Ghidra Headless 集成,导出函数级 C 伪代码
 - ⚡ 动态沙箱:VMware 快照回滚 / 本机受控运行,进程树/文件/注册表/DNS 监控
 - 🌐 网络抓包:pktmon 采集 + 自研 pcap 解析(连接聚合/DNS/HTTP/TLS-SNI)
+- 🤖 **AI 辅助分析**:工作流内置 `pe_ai_assist` 节点,AI 综合壳/保护/可疑点判定并给出逆向建议;**可联网搜索壳特征、DLL/函数功能、可疑行为模式**
+- 📄 PE 专项报告(HTML/MD/JSON,含 AI 辅助分析章节)
 - ⚙️ 自定义工作流:阶段启停/排序/参数配置,流水线实时可视化,断点续跑
 
 ### 工作流② UE 虚幻引擎专项(独立)
@@ -44,11 +46,12 @@ REVLab 是一个针对 Windows PE、UE 与 Unity 样本的可视化分析工作�
 - 🧬 **IL2CPP metadata 分析**:global-metadata.dat(magic 0xFAB11BAF、版本、字符串表)
 - 🔐 **Metadata 状态与恢复**:区分 `plain`、`decrypted`、`header_repaired`、损坏/未知;XOR 等真实恢复必须通过二次结构校验，单纯头部修复不会被标为解密
 - 🛠️ **SDK Dump**(对齐 Il2CppDumper):仅在已验证的明文或真实解密 Metadata 上生成 `Dump.cs` + `script.json` + C++ 头文件(`sdk_cpp/`)+ `sdk.json` + 输入 DLL/Metadata + manifest
-- 🎨 资源分析(UnityFS/UnityRaw/UnityWeb)+ 关键 API 字符串 + Unity 专项报告
+- 🤖 **AI 辅助分析**:工作流内置 `unity_ai_assist` 节点,AI 综合构建类型/Metadata 状态/SDK 完整性给出风险提示;**可联网搜索 Unity 版本的 IL2CPP metadata 格式、global-metadata.dat 结构、已知保护方案**
+- 🎨 资源分析(UnityFS/UnityRaw/UnityWeb)+ 关键 API 字符串 + Unity 专项报告(含 AI 辅助分析章节)
 
 ### 通用能力
 - 🗺️ **图化工作流 v3**(主站内嵌 Vue Flow 画布):节点拖拽连线、**多条件分支**、**审批节点**、**失败策略**(重试/跳过/终止)、单节点重跑/跳过、变量系统({{var}} 引用)、任务历史;预置模板(PE 全自动 / UE 专项 / Unity 专项)
-- 🤖 **AI 辅助分析节点**:通用 `ai_analyze` 节点可拖入任意工作流(引用 {{变量}} 让 AI 分析前序结果,支持文本/JSON 输出);UE 专项 `ue_ai_assist` 节点综合静态证据与反汇编片段,由 AI 判定**三大件精确地址(RVA+绝对VA)、GetName/FName 算法、解密算法**并写入报告;内置三大模板均已接入 AI 节点,AI 未配置时自动跳过不影响流程
+- 🤖 **AI 辅助分析节点**:三个工作流均内置专项 AI 节点(`pe_ai_assist` / `ue_ai_assist` / `unity_ai_assist`),综合前序节点证据由 AI 给出结论;**AI 可联网搜索 UE/Unity 源码结构、壳特征、保护方案等信息**;通用 `ai_analyze` 节点可拖入任意工作流(引用 {{变量}} 让 AI 分析前序结果);支持外部 AI 通过 MCP 驱动(无需配置内部 LLM);AI 结论自动写入报告
 - 🤖 **AI 工作台**:多会话持久化、新建/重命名/删除、上下文压缩、会话级模型与思考强度;可根据自然语言生成可编辑、可校验的 PE / UE / Unity 工作流草稿
 - 🧠 **模型预设**:OpenAI、DeepSeek、通义、智谱、Kimi、SiliconFlow、Gemini、OpenRouter、Groq、Together、Mistral、Perplexity、Azure OpenAI、Anthropic 兼容代理、Ollama、LM Studio
 - 🔌 MCP Server:37 个工具(含完整工作流控制),一键接入 Codex / Claude Code / Cursor / 自定义智能体;**外部 AI 可通过 MCP 完全驱动工作流**(创建任务→运行→读取证据→提交结论→重试节点→生成报告)
