@@ -314,6 +314,14 @@ _UE_SYSTEM_PROMPT = (
     "index bits, entry stride, header info offset, wide-bit position, length shift, and any XOR "
     "key). If decryption is required, derive the concrete algorithm and key from the evidence; "
     "otherwise set detected=false. Never invent memory values that are not supported by evidence. "
+    "\n\n"
+    "IMPORTANT: You SHOULD search the internet for information, especially:\n"
+    "- Search for UE source code matching the detected engine version (e.g. 'UE 5.5 FNamePool source')\n"
+    "- Look up FNamePool, FUObjectArray, GNames, GObjects structure definitions in the UE source\n"
+    "- Check if the UE version has known FName encryption or IndexToName changes\n"
+    "- Search for UE dumper projects (Dumper-7, UE4SS, UnrealDumper) for reference implementations\n"
+    "- Look up the game title if recognizable to find community reverse-engineering findings\n"
+    "Use the UE source code structure definitions to validate your address candidates and algorithm. "
     "Respond with exactly one JSON object, no prose or markdown fences."
 )
 

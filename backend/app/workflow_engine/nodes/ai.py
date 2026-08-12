@@ -289,3 +289,164 @@ def _ue_assist_success(assisted: dict, evidence: dict, result: dict, path: str) 
 def _ue_analysis_reuse(ctx) -> tuple[dict | None, str, str]:
     from .analysis import _ue_analysis
     return _ue_analysis(ctx)
+
+
+@register
+class PEAIAssistNode(BaseNode):
+    """PE 专项 AI 辅助:综合静态分析结果(PE 头/壳检测/字符串/反汇编/反编译)给出
+    综合判定(壳/保护/可疑点/逆向建议)。支持外部 AI 通过 MCP 驱动。"""
+
+    node_type = "pe_ai_assist"
+    label = "PE AI 辅助分析(壳/可疑点/建议)"
+    icon = "🤖"
+    category = "AI 辅助分析"
+    params_schema = [
+        {"key": "sample_path", "label": "样本路径", "type": "text", "default": ""},
+        {"key": "on_fail", "label": "AI 不可用策略", "type": "select", "default": "external_wait",
+         "options": ["external_wait", "skip", "abort"],
+         "desc": "external_wait:构建证据等待外部 AI; skip:跳过; abort:中止"},
+    ]
+
+    async def execute(self, ctx) -> NodeResult:
+        pool = ctx.get("pool") or {}
+        node_id = (ctx.get("node") or {}).get("id", "pe_ai_assist")
+        params = _prompt_params(ctx)
+
+        # 1) 外部 AI 已提交结论
+        ext = _external_ai_decision(pool, node_id)
+        if ext:
+            return NodeResult(outputs={**ext, "source": "external_ai"},
+                              summary="外部 AI 结论已应用")
+
+        # 2) 构建证据:从变量池收集前序节点输出
+        evidence = {
+            "pe": pool.get("pe_identify", {}),
+            "packer": pool.get("packer_detect", {}),
+            "protection": pool.get("pe_protection_matrix", {}),
+            "unpack_strategy": pool.get("pe_unpack_strategy", {}),
+            "strings": pool.get("strings", {}),
+            "disassembly": pool.get("disassemble", {}),
+            "decompile": pool.get("decompile", {}),
+            "dynamic": pool.get("dynamic", {}),
+        }
+        # 精简证据(去掉大字段)
+        for key in evidence:
+            if isinstance(evidence[key], dict):
+                evidence[key] = {k: v for k, v in evidence[key].items()
+                                 if k not in ("imports", "exports", "sections", "data_directories",
+                                              "resources", "functions") and not str(k).startswith("_")}
+
+        # 3) 内部 AI
+        cfg = _load_ai_cfg()
+        if _ai_configured(cfg):
+            from ...services.ai_workflow import apply_session_settings, normalize_reasoning
+            runtime = apply_session_settings(cfg, "", "balanced")
+            system = ("你是资深 Windows PE 逆向工程师。基于给出的静态分析数据,输出中文结论:\n"
+                      "1. 壳/保护判定(真实壳 vs 误报)\n2. 可疑点与恶意行为线索\n"
+                      "3. 逆向分析建议(下一步)\n\n"
+                      "重要:你可以搜索互联网获取信息,如:\n"
+                      "- 搜索样本中出现的 DLL/函数名了解其功能\n"
+                      "- 搜索壳特征确认壳类型\n"
+                      "- 搜索可疑行为模式\n"
+                      "用 JSON 格式输出。")
+            user = f"PE 分析数据:\n{json.dumps(evidence, ensure_ascii=False)[:15000]}"
+            try:
+                out = _chat_json(runtime, [{"role": "system", "content": system},
+                                           {"role": "user", "content": user}])
+                return NodeResult(
+                    outputs={"ai_output": True, "configured": True, "response": out["text"][:30000],
+                             "json": out.get("json"), "model": runtime.get("model", ""), "evidence": evidence},
+                    summary=out["text"][:120].replace("\n", " ") or "PE AI 分析完成")
+            except Exception as exc:
+                return NodeResult(status="failed",
+                                  outputs={"ai_output": True, "configured": True, "error": str(exc), "evidence": evidence},
+                                  summary=f"PE AI 失败: {str(exc)[:80]}", error=f"PE AI 失败: {exc}")
+
+        # 4) 等待外部 AI
+        if params.get("on_fail") == "skip":
+            return NodeResult(status="skipped",
+                              outputs={"ai_output": True, "configured": False, "evidence": evidence},
+                              summary="AI 未配置,跳过")
+        if params.get("on_fail") == "abort":
+            return NodeResult(status="failed", error="AI 模型未配置")
+        return _ai_waiting_node_result(node_id, evidence)
+
+
+@register
+class UnityAIAssistNode(BaseNode):
+    """Unity 专项 AI 辅助:综合 Unity 分析结果(版本/构建类型/metadata/SDK)给出
+    综合判定(构建结论/metadata 可用性/SDK 完整性/风险提示)。支持外部 AI 通过 MCP 驱动。"""
+
+    node_type = "unity_ai_assist"
+    label = "Unity AI 辅助分析(构建/SDK/风险)"
+    icon = "🤖"
+    category = "AI 辅助分析"
+    params_schema = [
+        {"key": "target_path", "label": "游戏文件夹路径", "type": "text", "default": ""},
+        {"key": "on_fail", "label": "AI 不可用策略", "type": "select", "default": "external_wait",
+         "options": ["external_wait", "skip", "abort"],
+         "desc": "external_wait:构建证据等待外部 AI; skip:跳过; abort:中止"},
+    ]
+
+    async def execute(self, ctx) -> NodeResult:
+        pool = ctx.get("pool") or {}
+        node_id = (ctx.get("node") or {}).get("id", "unity_ai_assist")
+        params = _prompt_params(ctx)
+
+        # 1) 外部 AI 已提交结论
+        ext = _external_ai_decision(pool, node_id)
+        if ext:
+            return NodeResult(outputs={**ext, "source": "external_ai"},
+                              summary="外部 AI 结论已应用")
+
+        # 2) 构建证据:从变量池收集前序节点输出
+        evidence = {
+            "scan": pool.get("unity_scan", {}),
+            "assembly": pool.get("unity_assembly", {}),
+            "metadata_candidates": pool.get("unity_metadata_candidates", {}),
+            "loader_analysis": pool.get("unity_loader_analysis", {}),
+            "metadata": pool.get("unity_metadata", {}),
+            "metadata_validation": pool.get("metadata_validation", {}),
+            "sdk": pool.get("sdk_dump", {}),
+        }
+        # 精简证据
+        for key in evidence:
+            if isinstance(evidence[key], dict):
+                evidence[key] = {k: v for k, v in evidence[key].items()
+                                 if not str(k).startswith("_") and k not in ("result",)}
+
+        # 3) 内部 AI
+        cfg = _load_ai_cfg()
+        if _ai_configured(cfg):
+            from ...services.ai_workflow import apply_session_settings, normalize_reasoning
+            runtime = apply_session_settings(cfg, "", "balanced")
+            system = ("你是资深 Unity/IL2CPP 逆向工程师。基于给出的分析数据,输出中文结论:\n"
+                      "1. 构建类型与版本结论\n2. Metadata 状态与可用性\n"
+                      "3. SDK 完整性评估\n4. 剩余风险与下一步建议\n\n"
+                      "重要:你可以搜索互联网获取信息,如:\n"
+                      "- 搜索检测到的 Unity 版本的 IL2CPP metadata 格式\n"
+                      "- 搜索 global-metadata.dat 结构定义和版本差异\n"
+                      "- 搜索 Unity 游戏的已知保护方案\n"
+                      "- 搜索 Il2CppDumper 等工具的实现参考\n"
+                      "用 JSON 格式输出。")
+            user = f"Unity 分析数据:\n{json.dumps(evidence, ensure_ascii=False)[:15000]}"
+            try:
+                out = _chat_json(runtime, [{"role": "system", "content": system},
+                                           {"role": "user", "content": user}])
+                return NodeResult(
+                    outputs={"ai_output": True, "configured": True, "response": out["text"][:30000],
+                             "json": out.get("json"), "model": runtime.get("model", ""), "evidence": evidence},
+                    summary=out["text"][:120].replace("\n", " ") or "Unity AI 分析完成")
+            except Exception as exc:
+                return NodeResult(status="failed",
+                                  outputs={"ai_output": True, "configured": True, "error": str(exc), "evidence": evidence},
+                                  summary=f"Unity AI 失败: {str(exc)[:80]}", error=f"Unity AI 失败: {exc}")
+
+        # 4) 等待外部 AI
+        if params.get("on_fail") == "skip":
+            return NodeResult(status="skipped",
+                              outputs={"ai_output": True, "configured": False, "evidence": evidence},
+                              summary="AI 未配置,跳过")
+        if params.get("on_fail") == "abort":
+            return NodeResult(status="failed", error="AI 模型未配置")
+        return _ai_waiting_node_result(node_id, evidence)
