@@ -27,13 +27,15 @@ REVLab 是一个针对 Windows PE、UE 与 Unity 样本的可视化分析工作�
 - ⚙️ 自定义工作流:阶段启停/排序/参数配置,流水线实时可视化,断点续跑
 
 ### 工作流② UE 虚幻引擎专项(独立)
-- 🎮 输入 dump 后的 exe,自动/手动识别引擎版本(知识库 4.27 / 5.0~5.5)
+- 🎮 输入 dump 后的 exe,自动/手动识别引擎版本(知识库 4.27 / 5.0~5.8)
 - 📥 源码轻量拉取:按版本在 GitHub 镜像定位分支,raw 拉取少量关键头文件(几 KB,本地缓存,不克隆大仓库)
-- 🗿 **三大件定位**:GNames / GObjects / GWorld / GEngine(特征字节签名扫描 + 地址、置信度、静态证据、运行时复核清单)
+- 🗿 **三大件定位**:GNames / GObjects / GWorld / GEngine(特征字节签名扫描 + **字符串交叉引用分析** + 地址、置信度、静态证据、运行时复核清单)
+- 🔤 **字符串交叉引用**:通过 GWorld/GEngine/UEngine 等关键字符串找到引用代码,提取全局变量地址;自动检测关键字符串可用性(报告哪些被剥离)
 - 🏷️ **FName / GNames 算法候选**:FNamePool 与直数组模型、分块索引/条目头/宽字符/长度位的候选公式和验证状态
 - 🔍 **反射系统分析**:UObject / UClass / UFunction / FProperty 反射结构、字段偏移、布局候选、混淆判定和运行时遍历计划
 - 🔐 保护与解密证据:先检测壳、节熵、加密线索与 FName 线索;输出明确的 `confirmed` / `candidate` / `unconfirmed` 状态，不把静态候选伪装成已验证地址
-- 📄 UE 专项报告(HTML/MD/JSON)
+- 🤖 **AI 辅助分析**:工作流内置 `ue_ai_assist` 节点,AI 综合静态证据判定三大件精确地址、GetName 算法、解密算法;支持外部 AI 通过 MCP 驱动(无需配置内部 LLM)
+- 📄 UE 专项报告(HTML/MD/JSON,含 AI 辅助分析章节)
 
 ### 工作流③ Unity 引擎专项(独立)
 - 📂 输入**游戏文件夹绝对路径**,自主分析
@@ -49,7 +51,7 @@ REVLab 是一个针对 Windows PE、UE 与 Unity 样本的可视化分析工作�
 - 🤖 **AI 辅助分析节点**:通用 `ai_analyze` 节点可拖入任意工作流(引用 {{变量}} 让 AI 分析前序结果,支持文本/JSON 输出);UE 专项 `ue_ai_assist` 节点综合静态证据与反汇编片段,由 AI 判定**三大件精确地址(RVA+绝对VA)、GetName/FName 算法、解密算法**并写入报告;内置三大模板均已接入 AI 节点,AI 未配置时自动跳过不影响流程
 - 🤖 **AI 工作台**:多会话持久化、新建/重命名/删除、上下文压缩、会话级模型与思考强度;可根据自然语言生成可编辑、可校验的 PE / UE / Unity 工作流草稿
 - 🧠 **模型预设**:OpenAI、DeepSeek、通义、智谱、Kimi、SiliconFlow、Gemini、OpenRouter、Groq、Together、Mistral、Perplexity、Azure OpenAI、Anthropic 兼容代理、Ollama、LM Studio
-- 🔌 MCP Server:23+ 分析工具,一键接入 Codex / Claude Code / Cursor / 自定义智能体
+- 🔌 MCP Server:37 个工具(含完整工作流控制),一键接入 Codex / Claude Code / Cursor / 自定义智能体;**外部 AI 可通过 MCP 完全驱动工作流**(创建任务→运行→读取证据→提交结论→重试节点→生成报告)
 - 📂 **输出目录可配置**:报告/抓包/脱壳产物/SDK 可指定输出根目录(设置页)
 - 📄 聚合报告:JSON / HTML / Markdown 多维报告
 
@@ -198,13 +200,36 @@ args = ["-m", "mcp_server.server", "--port", "8765"]
 
 `Settings → MCP → Add`,类型选 Command,粘贴 `python -m mcp_server.server --port 8765`,或编辑 `.cursor/mcp.json`。
 
-### MCP 工具清单(23 个)
+### MCP 工具清单(37 个)
 
 **PE 通用**:`analyze_pe` · `get_pe_info` · `list_sections` · `disassemble` · `get_imports_exports` · `extract_strings` · `detect_packer` · `unpack_known` · `decompile_ghidra` · `run_dynamic` · `capture_network` · `generate_report` · `run_pipeline` · `list_samples` · `register_sample`
 
 **UE 引擎**:`ue_versions` · `ue_analyze` · `ue_fetch_source` · `ue_report`
 
 **Unity 引擎**:`unity_analyze` · `unity_status` · `unity_dump_sdk` · `engine_analyses`
+
+**工作流控制**:`wf_workflows` · `wf_get` · `wf_node_types` · `wf_create_task` · `wf_run_task` · `wf_task` · `wf_task_outputs` · `wf_retry_node` · `wf_skip_node` · `wf_stop_task` · `wf_list_tasks`
+
+**AI 辅助**:`wf_resolve_ai`(外部 AI 提交分析结论) · `wf_regen_report`(重生成报告) · `wf_ai_inject`(注入 AI 结论) · `wf_ue_assist`(UE AI 证据包)
+
+### 外部 AI 驱动工作流(完整流程)
+
+外部 AI(如 opencode / Codex / Claude Code)通过 MCP 完全驱动工作流,**无需配置内部 LLM**:
+
+```
+wf_create_task → wf_run_task → wf_task(轮询) → wf_task_outputs(读证据)
+    ↓
+AI 分析证据(模型推理)
+    ↓
+wf_resolve_ai(提交结论) → wf_retry_node(重跑节点) → wf_task(等待完成)
+    ↓
+报告自动渲染 AI 结论
+```
+
+AI 节点三层决策链:
+1. 变量池中是否有外部 AI 已提交的结论(`_ai_decision_{node_id}`) → 直接使用
+2. 内部 AI 是否已配置(base_url/api_key/model) → 调用内部模型
+3. 都没有 → 构建证据并返回 `AI_WAITING`,外部 AI 通过 MCP 提交结论后重试
 
 ## 使用的开源项目 / 参考项目
 
@@ -233,6 +258,8 @@ REVLab 深度使用了以下开源项目,并向其作者致敬:
 | 项目 | 参考内容 |
 | --- | --- |
 | [Il2CppDumper](https://github.com/Perfare/Il2CppDumper) | Unity SDK dump 输出格式(Dump.cs / script.json)对齐参考 |
+| [Dumper-7](https://github.com/Encryqed/Dumper-7) | UE 字符串交叉引用定位三大件方法参考 |
+| [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) | UE 内存扫描与结构解析参考 |
 | [UnrealDumper](https://github.com/nneonneo/UnrealDumper) | UE 三大件(GNames/GObjects/GWorld)定位思路参考 |
 | [UE4Dumper](https://github.com/kp7742/UE4Dumper) | UE 三大件特征签名与结构偏移参考 |
 | [Wireshark](https://www.wireshark.org/) | pcap 格式规范参考(本项目为自研解析,不依赖) |
@@ -249,15 +276,17 @@ revlab/
 │       ├── core/       # 配置/数据库(输出目录可配置)
 │       ├── models/     # SQLAlchemy 模型(含 EngineAnalysis 引擎分析记录)
 │       ├── services/   # 分析引擎
-│       │   ├── ue/         # UE 虚幻引擎专项(版本/签名/源码轻量拉取/分析器)
+│       │   ├── ue/         # UE 虚幻引擎专项(版本/签名/源码轻量拉取/分析器/AI辅助/字符串交叉引用)
 │       │   ├── unity/      # Unity 专项(检测/程序集/il2cpp/metadata解密/SDK dump)
 │       │   └── ...         # PE/壳/反汇编/沙箱/pcap/Ghidra/AI/报告/引擎执行器
+│       ├── workflow_engine/ # 图化工作流引擎 v3(节点/条件/变量/执行器)
+│       │   └── nodes/      # 节点实现(分析/控制/AI辅助)
 │       └── orchestrator/   # 通用 PE 流水线状态机编排
-├── mcp_server/         # MCP Server(FastMCP,23 工具)
+├── mcp_server/         # MCP Server(FastMCP,37 工具)
 ├── frontend/           # Web UI(纯静态:样本库/UE/Unity/工作流/反汇编/AI/MCP/设置)
-├── ghidra/scripts/     # Ghidra 反编译导出脚本
+├── ghidra/scripts/     # Ghidra 反编译导出脚本(Java)
 ├── samples/            # 演示样本 + 构造器(PE/UE/Unity)
-├── scripts/            # 启动/工具下载脚本
+├── scripts/            # 启动/设置/工具下载脚本
 ├── data/               # SQLite 数据库/设置(运行时生成,git 忽略)
 ├── reports/            # 分析报告(pe/ue/unity,运行时生成,git 忽略)
 ├── captures/           # 抓包 pcap(运行时生成,git 忽略)
