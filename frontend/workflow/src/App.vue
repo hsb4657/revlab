@@ -8,16 +8,29 @@ import VariablesPanel from './components/VariablesPanel.vue'
 import RunPanel from './components/RunPanel.vue'
 
 const wfSelect = ref(null)
+const query = new URLSearchParams(window.location.search)
+const embedded = query.get('embedded') === '1'
+const requestedWorkflow = query.get('workflow') || ''
 const showToast = ref(false)
 let toastTimer = null
 
 onMounted(async () => {
   try {
+    store.contextSampleId = Number(query.get('sample_id') || 0)
     await loadSpec()
     await loadWorkflows()
+    if (query.get('new') === '1') {
+      await newWorkflow()
+      return
+    }
     if (store.workflows.length) {
-      wfSelect.value = store.workflows[0].id
-      await loadWorkflow(store.workflows[0].id)
+      const preferred = requestedWorkflow
+        ? store.workflows.find((workflow) => workflow.name === requestedWorkflow) || store.workflows[0]
+        : store.contextSampleId
+        ? store.workflows.find((workflow) => workflow.name === 'pe-auto') || store.workflows[0]
+        : store.workflows[0]
+      wfSelect.value = preferred.id
+      await loadWorkflow(preferred.id)
     }
   } catch (e) {
     store.toast = { msg: '初始化失败: ' + e.message, type: 'err', t: Date.now() }
@@ -58,9 +71,11 @@ watch(() => store.toast.t, () => {
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" :class="{ embedded }">
     <header class="topbar">
-      <div class="logo">REV<span>Lab</span><em>· 图化工作流</em></div>
+      <div v-if="!embedded" class="logo">REV<span>Lab</span><em>· 图化工作流</em></div>
+      <div v-else class="workspace-title">图工作流</div>
+      <span v-if="store.contextSampleId" class="sample-context">样本 #{{ store.contextSampleId }}</span>
       <input class="wf-name" v-model="store.wfName" placeholder="工作流名称(必填)" />
       <input class="wf-desc" v-model="store.wfDesc" placeholder="描述(可选)" />
       <select v-model="wfSelect" @change="onSelectWorkflow">

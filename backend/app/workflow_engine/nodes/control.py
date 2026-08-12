@@ -9,6 +9,30 @@ from .base import BaseNode, NodeResult, register
 
 
 @register
+class StartNode(BaseNode):
+    node_type = "start"
+    label = "工作流开始"
+    icon = "▶"
+    category = "控制"
+    params_schema = []
+
+    async def execute(self, ctx) -> NodeResult:
+        return NodeResult(outputs={"started": True}, summary="工作流开始")
+
+
+@register
+class EndNode(BaseNode):
+    node_type = "end"
+    label = "工作流结束"
+    icon = "■"
+    category = "控制"
+    params_schema = []
+
+    async def execute(self, ctx) -> NodeResult:
+        return NodeResult(outputs={"ended": True}, summary="工作流结束")
+
+
+@register
 class ConditionNode(BaseNode):
     node_type = "condition"
     label = "条件分支"
@@ -81,6 +105,42 @@ class ScriptNode(BaseNode):
 
 
 @register
+class CommandNode(BaseNode):
+    node_type = "command"
+    label = "自定义命令"
+    icon = "⌘"
+    category = "自定义"
+    params_schema = [
+        {"key": "command", "label": "命令", "type": "text", "default": "", "required": True,
+         "desc": "支持 {{变量}} 占位符; stdout 中的结果会写入变量池"},
+        {"key": "cwd", "label": "工作目录", "type": "text", "default": "", "required": False},
+        {"key": "timeout", "label": "超时(秒)", "type": "number", "default": 120},
+    ]
+
+    async def execute(self, ctx) -> NodeResult:
+        from ...core.config import BASE_DIR
+        from ..variables import resolve
+        command = resolve(str(ctx["params"].get("command", "")), ctx["pool"])
+        if not command.strip():
+            return NodeResult(status="failed", error="命令不能为空")
+        cwd = resolve(str(ctx["params"].get("cwd", "") or ""), ctx["pool"]) or str(BASE_DIR)
+        timeout = max(1, int(ctx["params"].get("timeout", 120) or 120))
+        try:
+            p = subprocess.run(command, shell=True, cwd=cwd, capture_output=True,
+                               text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return NodeResult(status="failed", error=f"命令超时({timeout}s)")
+        except Exception as exc:
+            return NodeResult(status="failed", error=f"命令执行失败: {exc}")
+        stdout = (p.stdout or "")[:50000]
+        stderr = (p.stderr or "")[:5000]
+        return NodeResult(status="success" if p.returncode == 0 else "failed",
+                          outputs={"stdout": stdout, "stderr": stderr, "exit_code": p.returncode},
+                          summary=f"命令退出码 {p.returncode}",
+                          error=stderr if p.returncode else "")
+
+
+@register
 class ApprovalNode(BaseNode):
     node_type = "approval"
     label = "人工审批"
@@ -114,20 +174,44 @@ class ReportNode(BaseNode):
 
     async def execute(self, ctx) -> NodeResult:
         from ...services import report as report_svc
-        from ...core.config import REPORTS_DIR
         # 汇总变量池中所有节点的 summary
         pool = ctx["pool"]
         sections = []
+        ai_outputs = {}
         for k, v in pool.items():
-            if isinstance(v, dict) and v.get("__summary"):
-                sections.append({"key": k, "summary": v["__summary"]})
+            if isinstance(v, dict):
+                if v.get("__summary"):
+                    sections.append({"key": k, "summary": v["__summary"]})
+                if v.get("ai_output"):
+                    ai_outputs[k] = {kk: vv for kk, vv in v.items() if not str(kk).startswith("__")}
         payload = {"workflow_summary": sections, "variables": {k: v for k, v in pool.items()
                                                                if not str(k).startswith("_") and isinstance(v, (str, int, float, bool))}}
-        name = ctx["params"].get("title", "REVLab 分析报告")
-        out = REPORTS_DIR / "wf"
+        if ai_outputs:
+            payload["ai_outputs"] = ai_outputs
+        title = ctx["params"].get("title", "REVLab 分析报告")
+        source = str(ctx["params"].get("sample_path") or ctx["params"].get("target_path") or "")
+        if not source:
+            for value in pool.values():
+                if not isinstance(value, dict):
+                    continue
+                source = str(value.get("sample_path") or value.get("target_path") or value.get("file_name") or "")
+                if source:
+                    break
+        source_name = Path(source).name if source else str(title)
+        payload["title"] = title
+        # Every graph run owns one portable artifact directory.  Keep direct
+        # node callers usable with the configured root fallback.
+        output_root = ctx.get("output_dir")
+        if output_root:
+            out = Path(str(output_root)) / "report"
+        else:
+            from ...core.config import config
+            out = config.OUTPUT_ROOT / "runs" / f"task_{ctx.get('task_id', 'adhoc')}" / "report"
         out.mkdir(parents=True, exist_ok=True)
-        paths = report_svc.save_report({"sample": {"file_name": name},
+        report_name = report_svc.analysis_report_name(source_name, "analysis")
+        paths = report_svc.save_report({"sample": {"file_name": source_name},
                                         "analysis": {"workflow": payload}},
-                                       out, f"wf_{ctx['task_id']}")
-        return NodeResult(outputs={"report_paths": paths, "sections": sections},
+                                       out, report_name)
+        return NodeResult(outputs={"report_paths": paths, "sections": sections,
+                                   "report_name": report_name, "source_name": source_name},
                           summary=f"报告已生成: {paths.get('html','')}")

@@ -20,10 +20,85 @@
 from __future__ import annotations
 
 import binascii
+import hashlib
 import json
 import math
+import os
+import re
+import shutil
 import struct
+import subprocess
 from pathlib import Path
+
+from ...core.config import config
+
+
+def recover_split_metadata(game_root: str, out_dir: str) -> dict:
+    """Recover a recognized split IL2CPP metadata container into a run directory."""
+    from .split_metadata import detect_recipe, recover
+
+    detection = detect_recipe(game_root)
+    if not detection.get("supported"):
+        return {"recognized": False, "detection": detection, "output": {}, "validation": {},
+                "error": detection.get("reason", "No supported split metadata descriptor was found")}
+    result = recover(game_root, out_dir)
+    result["recognized"] = True
+    result["detection"] = detection
+    result["manifest_path"] = str(Path(out_dir) / "recovery_manifest.json")
+    return result
+
+
+def _pe_registration_addresses(gameassembly_path: str, metadata_path: str) -> dict:
+    """Locate adjacent v24.1 Code/MetadataRegistration structures in a PE.
+
+    Protected Unity builds can remove the usual mscorlib reference chain while
+    leaving the runtime registration structures intact.  The metadata
+    registration is anchored by the type-definition count twice; for v24.1 the
+    code registration immediately precedes it by 0x90 bytes.
+    """
+    try:
+        import pefile
+        pe = pefile.PE(gameassembly_path, fast_load=False)
+        blob = Path(gameassembly_path).read_bytes()
+        metadata = Path(metadata_path).read_bytes()
+        type_bytes = struct.unpack_from("<I", metadata, 0xA4)[0]
+        type_count = type_bytes // 0x64 if type_bytes and type_bytes % 0x64 == 0 else 0
+        if not type_count:
+            return {"found": False, "reason": "type definition count is unavailable"}
+        image_base = int(pe.OPTIONAL_HEADER.ImageBase)
+        candidates = []
+        for section in pe.sections:
+            if not (int(section.Characteristics) & 0x40000000):
+                continue
+            start = int(section.PointerToRawData)
+            end = min(len(blob), start + int(section.SizeOfRawData))
+            for pos in range(start, max(start, end - 0x80), 8):
+                if struct.unpack_from("<Q", blob, pos + 0x50)[0] != type_count:
+                    continue
+                if struct.unpack_from("<Q", blob, pos + 0x60)[0] != type_count:
+                    continue
+                code_pos = pos - 0x90
+                if code_pos < start:
+                    continue
+                pairs = [struct.unpack_from("<QQ", blob, code_pos + i * 16) for i in range(9)]
+                plausible = sum(1 for count, pointer in pairs if count < 0x1000000 and (count == 0 or pointer >= image_base))
+                if plausible < 8:
+                    continue
+                metadata_rva = int(section.VirtualAddress) + (pos - start)
+                code_rva = int(section.VirtualAddress) + (code_pos - start)
+                candidates.append({
+                    "code_registration": image_base + code_rva,
+                    "metadata_registration": image_base + metadata_rva,
+                    "type_definitions_count": type_count,
+                    "section": section.Name.rstrip(b"\0").decode("ascii", errors="replace"),
+                    "score": plausible,
+                })
+        if not candidates:
+            return {"found": False, "reason": "registration structure anchor was not found"}
+        best = sorted(candidates, key=lambda item: item["score"], reverse=True)[0]
+        return {"found": True, **best, "candidate_count": len(candidates)}
+    except Exception as exc:
+        return {"found": False, "reason": str(exc)}
 
 # ----------------------------------------------------------------------------
 # Il2Cpp metadata 常量与布局
@@ -35,7 +110,7 @@ IL2CPP_MAGIC = b"\xaf\x1b\xb1\xfa"
 # metadata 头部固定区(0x00~0xF0 内为 int32 offset + int32 count 成对,24~33 版本布局一致)
 # 后续仍有 fieldRefs / referencedAssemblies / attributes / methodSpecs / stringLiteral 等扩展表,
 # 但核心 offset/count 布局在 24~33 之间基本不变。
-HEADER_SIZE = 0xF0
+HEADER_SIZE = 0xF8
 
 # (表名, 头部字段偏移)。offset 在 off,count 在 off+4。
 _HEADER_FIELDS = [
@@ -221,45 +296,226 @@ def _cpp_type(t: str) -> str:
     return t.replace(".", "::") + "*"
 
 
+def _record_table_sizes(version: int) -> dict[str, int]:
+    """Return record sizes for the tables parsed by this module."""
+    return {
+        "stringLiteral": _STRING_LITERAL_SIZE,
+        "events": 8,
+        "properties": _PROP_DEF_SIZE,
+        "methods": _METHOD_SIZE_V24 if version <= 24 else _METHOD_SIZE_V25,
+        "parameters": _PARAM_DEF_SIZE,
+        "fields": _FIELD_DEF_SIZE,
+        "interfaces": 4,
+        "typeDefinitions": _TD_SIZE_V24 if version <= 24 else _TD_SIZE_V25,
+        "images": _IMAGE_SIZE_V26 if version <= 26 else _IMAGE_SIZE_V27,
+    }
+
+
+def _read_header_tables(data: bytes) -> dict[str, dict]:
+    """Read raw offset/count pairs without assuming count semantics."""
+    tables = {}
+    for name, off in _HEADER_FIELDS:
+        if off + 8 > len(data):
+            break
+        raw_count = _int32(data, off + 4)
+        tables[name] = {
+            "offset": _int32(data, off),
+            "count": raw_count,
+            "raw_count": raw_count,
+        }
+    return tables
+
+
+def _infer_table_count_semantics(data: bytes, version: int, tables: dict) -> str:
+    """Infer whether record-table counts are byte lengths or record counts.
+
+    Official IL2CPP metadata stores byte lengths in most header count fields.
+    Older REVLab fixtures used record counts.  Supporting both keeps fixtures
+    useful while making real metadata parse with the official layout.
+    """
+    byte_score = 0
+    record_score = 0
+    for name, record_size in _record_table_sizes(version).items():
+        table = tables.get(name) or {}
+        offset = table.get("offset", 0)
+        raw_count = table.get("raw_count", 0)
+        if raw_count <= 0 or offset < 0:
+            continue
+        if raw_count % record_size == 0 and offset + raw_count <= len(data):
+            byte_score += 1
+        if offset + raw_count * record_size <= len(data):
+            record_score += 1
+    if byte_score and byte_score >= record_score:
+        return "byte_length"
+    if record_score:
+        return "record_count_compatibility"
+    return "unknown"
+
+
+def _metadata_integrity(data: bytes) -> dict:
+    """Validate the header enough to distinguish plaintext from bad input.
+
+    This is intentionally conservative: a valid magic alone never proves that
+    a metadata file is usable or that a recovered file was decrypted correctly.
+    """
+    magic_ok = len(data) >= 4 and data[:4] == IL2CPP_MAGIC
+    version = _int32(data, 4) if len(data) >= 8 else 0
+    supported_version = _MIN_VERSION <= version <= _MAX_VERSION
+    diagnostics = []
+    if len(data) < HEADER_SIZE:
+        diagnostics.append(f"metadata is too small for the header ({len(data)} bytes)")
+    if not magic_ok:
+        diagnostics.append("metadata magic does not match 0xFAB11BAF")
+    if magic_ok and not supported_version:
+        diagnostics.append(
+            f"metadata version {version} is outside supported range "
+            f"{_MIN_VERSION}-{_MAX_VERSION}"
+        )
+
+    tables = _read_header_tables(data)
+    semantics = "unknown"
+    if magic_ok and supported_version:
+        semantics = _infer_table_count_semantics(data, version, tables)
+        sizes = _record_table_sizes(version)
+        for name, table in tables.items():
+            offset = table["offset"]
+            raw_count = table["raw_count"]
+            if offset < 0 or raw_count < 0:
+                diagnostics.append(f"table {name} has a negative offset or count")
+                continue
+            record_size = sizes.get(name)
+            if record_size and raw_count:
+                count = raw_count // record_size if semantics == "byte_length" else raw_count
+                table["count"] = count
+                table["count_semantics"] = semantics
+                payload_size = raw_count if semantics == "byte_length" else raw_count * record_size
+                if offset < HEADER_SIZE or offset + payload_size > len(data):
+                    diagnostics.append(f"table {name} is outside the metadata file")
+            elif name == "string" and raw_count and offset:
+                # The string table's count is not standardized across every Unity
+                # version.  Only reject an impossible offset here.
+                if offset < HEADER_SIZE or offset >= len(data):
+                    diagnostics.append("string table offset is outside the metadata file")
+
+    return {
+        "magic_ok": magic_ok,
+        "version": version,
+        "supported_version": supported_version,
+        "tables": tables,
+        "table_count_semantics": semantics,
+        "diagnostics": diagnostics,
+        "valid": bool(magic_ok and supported_version and not diagnostics),
+    }
+
+
+def _single_byte_xor_header_key(data: bytes) -> int | None:
+    """Return a credible whole-file XOR key based on the metadata header."""
+    if len(data) < 8:
+        return None
+    key = data[0] ^ IL2CPP_MAGIC[0]
+    if any((data[index] ^ key) != IL2CPP_MAGIC[index] for index in range(4)):
+        return None
+    version = struct.unpack_from("<i", bytes(value ^ key for value in data[4:8]))[0]
+    return key if _MIN_VERSION <= version <= _MAX_VERSION else None
+
+
 # ----------------------------------------------------------------------------
 # 公开函数 1:加密检测
 # ----------------------------------------------------------------------------
 def check_metadata_encrypted(meta_path: str) -> dict:
-    """检测 global-metadata.dat 是否被加密。
+    """Inspect metadata without conflating encryption, corruption and absence.
 
-    判定:文件头 4 字节 magic 应为 0xFAB11BAF(b'\\xaf\\x1b\\xb1\\xfa');
-    若 magic 不符或整体熵 > 7.5 则视为加密。
-
-    返回:
-      {"encrypted": False, "version": v, "magic_ok": True, "entropy": x}  未加密
-      {"encrypted": True,  "reason": str, "magic": hex, "entropy": x}    加密/损坏
+    The legacy ``encrypted`` boolean remains for callers that use it, while
+    ``status`` and ``diagnostics`` provide the decision that should be shown to
+    a user.  A correct magic is only considered plaintext after header and
+    table-boundary validation succeeds.
     """
     p = Path(meta_path)
     if not p.is_file():
-        return {"encrypted": True, "reason": f"文件不存在: {meta_path}",
-                "magic": "", "entropy": 0.0, "error": "file not found"}
+        return {
+            "status": "missing",
+            "encrypted": False,
+            "encryption_suspected": False,
+            "decrypt_required": False,
+            "recovery_recommended": False,
+            "parseable": False,
+            "magic_ok": False,
+            "magic": "",
+            "entropy": 0.0,
+            "diagnostics": ["metadata file not found"],
+            "error": "file not found",
+        }
     data = p.read_bytes()
     magic = data[:4]
-    magic_ok = (magic == IL2CPP_MAGIC)
     ent = round(_entropy(data), 3)
-
     if len(data) < 16:
-        return {"encrypted": True,
-                "reason": "文件过小(<16 字节),不可能是合法 metadata",
-                "magic": binascii.hexlify(magic).decode(), "entropy": ent}
+        return {
+            "status": "corrupt_or_unknown",
+            "encrypted": False,
+            "encryption_suspected": False,
+            "decrypt_required": False,
+            "recovery_recommended": False,
+            "parseable": False,
+            "magic_ok": False,
+            "magic": binascii.hexlify(magic).decode(),
+            "entropy": ent,
+            "diagnostics": ["metadata is smaller than 16 bytes"],
+        }
 
-    if magic_ok and ent <= 7.5:
-        version = _int32(data, 4)
-        return {"encrypted": False, "version": version, "magic_ok": True,
-                "entropy": ent, "magic": "0xFAB11BAF"}
+    integrity = _metadata_integrity(data)
+    base = {
+        "version": integrity["version"],
+        "magic_ok": integrity["magic_ok"],
+        "magic": "0xFAB11BAF" if integrity["magic_ok"] else binascii.hexlify(magic).decode(),
+        "entropy": ent,
+        "table_count_semantics": integrity["table_count_semantics"],
+        "diagnostics": integrity["diagnostics"],
+    }
+    if integrity["valid"]:
+        return {
+            **base,
+            "status": "plain",
+            "encrypted": False,
+            "encryption_suspected": False,
+            "decrypt_required": False,
+            "recovery_recommended": False,
+            "parseable": True,
+            "reason": "metadata header and table boundaries are valid",
+        }
+    if integrity["magic_ok"]:
+        return {
+            **base,
+            "status": "plain_but_invalid",
+            "encrypted": False,
+            "encryption_suspected": False,
+            "decrypt_required": False,
+            "recovery_recommended": False,
+            "parseable": False,
+            "reason": "metadata magic is present but the header is not usable",
+        }
 
-    reasons = []
-    if not magic_ok:
-        reasons.append(f"magic 不符(期望 0xFAB11BAF,实际 0x{binascii.hexlify(magic).decode()})")
+    embedded_header = _find_valid_header(data)
+    xor_key = _single_byte_xor_header_key(data)
+    suspected = ent > 7.5 or embedded_header is not None or xor_key is not None
+    diagnostics = list(base["diagnostics"])
     if ent > 7.5:
-        reasons.append(f"整体熵过高({ent} > 7.5),疑似加密/压缩")
-    return {"encrypted": True, "reason": ";".join(reasons),
-            "magic": binascii.hexlify(magic).decode(), "entropy": ent}
+        diagnostics.append("entropy is high enough to indicate encryption or compression")
+    if embedded_header is not None:
+        diagnostics.append(f"recoverable metadata header found at 0x{embedded_header[0]:x}")
+    if xor_key is not None:
+        diagnostics.append(f"single-byte XOR header candidate: 0x{xor_key:02x}")
+    status = "encrypted_or_obfuscated" if suspected else "corrupt_or_unknown"
+    return {
+        **base,
+        "status": status,
+        "encrypted": suspected,
+        "encryption_suspected": suspected,
+        "decrypt_required": suspected,
+        "recovery_recommended": True,
+        "parseable": False,
+        "diagnostics": diagnostics,
+        "reason": "metadata magic is not at the expected offset",
+    }
 
 
 # ----------------------------------------------------------------------------
@@ -286,7 +542,7 @@ def _try_parse_ok(path) -> dict | None:
     """对解密产物做二次校验:能正常解析头部与计数则视为成功。"""
     try:
         r = parse_metadata(str(path))
-        if r.get("magic_ok"):
+        if r.get("valid"):
             return r
     except Exception:
         pass
@@ -325,10 +581,42 @@ def decrypt_metadata(meta_path: str, gameassembly_path: str = "", out_path: str 
     """
     p = Path(meta_path)
     if not p.is_file():
-        return {"ok": False, "method": "failed", "note": f"文件不存在: {meta_path}"}
+        return {
+            "ok": False,
+            "status": "missing",
+            "verified": False,
+            "decrypted": False,
+            "repaired": False,
+            "method": "failed",
+            "decrypted_path": "",
+            "note": f"文件不存在: {meta_path}",
+        }
     data = p.read_bytes()
     if len(data) < 16:
-        return {"ok": False, "method": "failed", "note": "文件过小(<16 字节),无法解密"}
+        return {
+            "ok": False,
+            "status": "decryption_failed",
+            "verified": False,
+            "decrypted": False,
+            "repaired": False,
+            "method": "failed",
+            "decrypted_path": "",
+            "note": "文件过小(<16 字节),无法解密",
+        }
+
+    source_status = check_metadata_encrypted(str(p))
+    if source_status.get("status") == "plain":
+        return {
+            "ok": True,
+            "status": "not_required",
+            "verified": True,
+            "decrypted": False,
+            "repaired": False,
+            "method": "not_required",
+            "decrypted_path": str(p),
+            "version": source_status.get("version"),
+            "note": "metadata is already verified plaintext",
+        }
 
     if out_path is None:
         out_path = str(p.with_name(p.stem + "_decrypted" + p.suffix))
@@ -346,7 +634,10 @@ def decrypt_metadata(meta_path: str, gameassembly_path: str = "", out_path: str 
             out.write_bytes(dec)
             check = _try_parse_ok(out)
             if check:
-                return {"ok": True, "decrypted_path": str(out),
+                # A valid header at a non-zero offset means the container/prefix
+                # was repaired, not that encrypted payload bytes were decrypted.
+                return {"ok": True, "status": "header_repaired", "verified": True,
+                        "decrypted": False, "repaired": True, "decrypted_path": str(out),
                         "method": f"头部恢复(截断前缀 {off} 字节)",
                         "version": check.get("version", ver),
                         "note": f"在偏移 0x{off:x} 找到合法 magic 头,version={ver}"}
@@ -368,7 +659,8 @@ def decrypt_metadata(meta_path: str, gameassembly_path: str = "", out_path: str 
             out.write_bytes(dec)
             check = _try_parse_ok(out)
             if check:
-                return {"ok": True, "decrypted_path": str(out),
+                return {"ok": True, "status": "decrypted", "verified": True,
+                        "decrypted": True, "repaired": False, "decrypted_path": str(out),
                         "method": f"XOR key=0x{key:02x}",
                         "version": check.get("version", ver),
                         "note": f"整文件单字节 XOR(0x{key:02x})解密成功"}
@@ -383,7 +675,10 @@ def decrypt_metadata(meta_path: str, gameassembly_path: str = "", out_path: str 
             out.write_bytes(dec)
             check = _try_parse_ok(out)
             if check:
-                return {"ok": True, "decrypted_path": str(out),
+                # Structural validation proves the repaired file parses, but it
+                # does not prove that any encrypted payload was decrypted.
+                return {"ok": True, "status": "header_repaired", "verified": True,
+                        "decrypted": False, "repaired": True, "decrypted_path": str(out),
                         "method": "头部恢复",
                         "version": check.get("version", ver4),
                         "note": "magic 被改写但 version 可读,已恢复文件头"}
@@ -406,65 +701,65 @@ def decrypt_metadata(meta_path: str, gameassembly_path: str = "", out_path: str 
     if extra:
         note += ";" + extra
     note += "。建议提供内存 dump 或人工用 Il2CppDumper 处理。"
-    return {"ok": False, "method": "failed", "decrypted_path": str(out), "note": note}
+    try:
+        out.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return {
+        "ok": False,
+        "status": "decryption_failed",
+        "verified": False,
+        "decrypted": False,
+        "repaired": False,
+        "method": "failed",
+        "decrypted_path": "",
+        "diagnostics": notes,
+        "note": note,
+    }
 
 
 # ----------------------------------------------------------------------------
 # 公开函数 3:metadata 头部解析
 # ----------------------------------------------------------------------------
 def parse_metadata(meta_path: str) -> dict:
-    """解析未加密 metadata 的头部与关键表。
-
-    头部字段为 int32(offset) + int32(count) 成对;布局在版本 24~33 基本一致。
-    返回:
-      {"version": int, "magic_ok": bool,
-       "string_count": n, "type_count": n, "method_count": n, "field_count": n,
-       "string_literal_count": n, "sizes": {"header": ..., "offset": ...},
-       "tables": {表名: {"offset":..., "count":...}, ...}}
-    若 magic_ok=False:返回 {"version": 0, "error": "...", "magic_ok": False}
-    """
+    """Parse verified plaintext metadata and expose normalized table counts."""
     p = Path(meta_path)
     if not p.is_file():
-        return {"version": 0, "error": f"文件不存在: {meta_path}", "magic_ok": False}
+        return {
+            "version": 0,
+            "magic_ok": False,
+            "valid": False,
+            "status": "missing",
+            "error": f"文件不存在: {meta_path}",
+            "diagnostics": ["metadata file not found"],
+        }
     data = p.read_bytes()
-    if len(data) < HEADER_SIZE:
-        return {"version": 0,
-                "error": f"文件过小({len(data)} 字节),不可能是合法 metadata",
-                "magic_ok": False}
-
-    if data[:4] != IL2CPP_MAGIC:
-        return {"version": 0, "error": "metadata 加密或损坏,请先 decrypt_metadata",
-                "magic_ok": False}
-
-    version = _int32(data, 4)
-    tables = {}
-    header_end = 4
-    warnings = []
-    for name, off in _HEADER_FIELDS:
-        if off + 8 > len(data):
-            break
-        o = _int32(data, off)
-        c = _int32(data, off + 4)
-        tables[name] = {"offset": o, "count": c}
-        header_end = off + 8
-        if o < 0 or c < 0:
-            warnings.append(f"表 {name} 出现负偏移/计数({o}/{c}),头部可能异常")
+    integrity = _metadata_integrity(data)
+    tables = integrity["tables"]
 
     def _t(name):
-        return tables.get(name, {"offset": 0, "count": 0})
+        return tables.get(name, {"offset": 0, "count": 0, "raw_count": 0})
 
-    return {
-        "version": version,
-        "magic_ok": True,
+    parsed = {
+        "version": integrity["version"],
+        "magic_ok": integrity["magic_ok"],
+        "valid": integrity["valid"],
+        "status": "plain" if integrity["valid"] else "invalid",
+        "supported_version": integrity["supported_version"],
+        "table_count_semantics": integrity["table_count_semantics"],
         "string_count": _t("string").get("count", 0),
         "type_count": _t("typeDefinitions").get("count", 0),
         "method_count": _t("methods").get("count", 0),
         "field_count": _t("fields").get("count", 0),
         "string_literal_count": _t("stringLiteral").get("count", 0),
-        "sizes": {"header": header_end, "offset": len(data), "file_size": len(data)},
+        "sizes": {"header": HEADER_SIZE, "offset": len(data), "file_size": len(data)},
         "tables": tables,
-        "warnings": warnings,
+        "warnings": integrity["diagnostics"],
+        "diagnostics": integrity["diagnostics"],
     }
+    if not integrity["valid"]:
+        parsed["error"] = "metadata header is not a verified supported layout"
+    return parsed
 
 
 # ----------------------------------------------------------------------------
@@ -479,6 +774,7 @@ class MetadataParser:
         self.size = len(self.data)
         self.version = 0
         self.header = {}
+        self.table_count_semantics = "unknown"
         self.warnings = []
         self._str_cache = {}
         self._td_cache = {}
@@ -486,16 +782,15 @@ class MetadataParser:
 
     # ------------------------- 头部 -------------------------
     def _load_header(self):
-        if self.size < 4 or self.data[:4] != IL2CPP_MAGIC:
+        integrity = _metadata_integrity(self.data)
+        if not integrity["magic_ok"]:
             raise ValueError("metadata 加密或损坏,请先 decrypt_metadata")
-        self.version = _int32(self.data, 4)
-        if not (_MIN_VERSION <= self.version <= _MAX_VERSION):
-            self.warnings.append(f"版本 {self.version} 不在经验区间 {_MIN_VERSION}~{_MAX_VERSION}")
-        for name, off in _HEADER_FIELDS:
-            if off + 8 > self.size:
-                break
-            self.header[name] = {"offset": _int32(self.data, off),
-                                 "count": _int32(self.data, off + 4)}
+        if not integrity["valid"]:
+            detail = "; ".join(integrity["diagnostics"][:3])
+            raise ValueError(f"metadata header validation failed: {detail}")
+        self.version = integrity["version"]
+        self.table_count_semantics = integrity["table_count_semantics"]
+        self.header = integrity["tables"]
 
     def _tab(self, name) -> dict:
         return self.header.get(name, {"offset": 0, "count": 0})
@@ -900,7 +1195,179 @@ def _build_cpp(parser: MetadataParser, types: list, cpp_dir: Path) -> list:
     return written
 
 
-def dump_sdk(meta_path: str, gameassembly_path: str, out_dir: str) -> dict:
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact(kind: str, path: str | Path, *, required: bool = True) -> dict:
+    p = Path(path) if path else None
+    exists = bool(p and p.exists())
+    item = {
+        "kind": kind,
+        "path": str(p) if p else "",
+        "required": required,
+        "exists": exists,
+    }
+    if exists and p and p.is_file():
+        item.update({
+            "size": p.stat().st_size,
+            "sha256": _sha256_file(p),
+        })
+    return item
+
+
+def _deliver_input_file(source_path: str, delivery_dir: Path, name: str) -> dict:
+    """Make an SDK delivery self-contained, preferring a hard link to a copy."""
+    source = Path(source_path) if source_path else None
+    if not source or not source.is_file():
+        return {
+            "source_path": str(source) if source else "",
+            "delivery_path": "",
+            "delivery_method": "missing",
+            "exists": False,
+        }
+    delivery_dir.mkdir(parents=True, exist_ok=True)
+    destination = delivery_dir / name
+    try:
+        same_file = source.resolve() == destination.resolve()
+    except OSError:
+        same_file = False
+    method = "existing"
+    if not same_file:
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            os.link(source, destination)
+            method = "hardlink"
+        except OSError:
+            shutil.copy2(source, destination)
+            method = "copy"
+    artifact = _artifact("input", destination if not same_file else source)
+    artifact.update({
+        "source_path": str(source),
+        "delivery_path": str(destination if not same_file else source),
+        "delivery_method": method,
+    })
+    return artifact
+
+
+def _official_il2cpp_dumper(
+    meta_path: str,
+    gameassembly_path: str,
+    out_dir: Path,
+    registration: dict | None = None,
+) -> dict:
+    """Run the official Il2CppDumper CLI and verify its real delivery surface."""
+    executable = Path(config.IL2CPP_DUMPER_PATH)
+    if not executable.is_file():
+        return {"ok": False, "status": "official_tool_missing", "error": str(executable)}
+    tool_dir = executable.parent
+    config_path = tool_dir / "config.json"
+    if config_path.is_file():
+        try:
+            settings = json.loads(config_path.read_text(encoding="utf-8"))
+            settings["GenerateDummyDll"] = True
+            settings["GenerateScript"] = True
+            settings["GenerateStruct"] = True
+            settings["RequireAnyKey"] = False
+            config_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "status": "official_tool_config_failed", "error": str(exc)}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    command = [str(executable), str(Path(gameassembly_path)), str(Path(meta_path)), str(out_dir)]
+    registration = registration or _pe_registration_addresses(gameassembly_path, meta_path)
+    if registration.get("found"):
+        command.extend([
+            f"{int(registration['code_registration']):x}",
+            f"{int(registration['metadata_registration']):x}",
+        ])
+    try:
+        process = subprocess.run(
+            command, cwd=str(tool_dir), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=900,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "status": "official_tool_failed", "error": str(exc), "command": command}
+    log_path = out_dir / "Il2CppDumper.log"
+    log_path.write_text(
+        (process.stdout or "") + ("\n[stderr]\n" + process.stderr if process.stderr else ""),
+        encoding="utf-8",
+    )
+    dummy_dir = out_dir / "DummyDll"
+    dummy_dlls = sorted(str(path) for path in dummy_dir.glob("*.dll")) if dummy_dir.is_dir() else []
+    expected = {
+        "dump_cs": out_dir / "dump.cs",
+        "script_json": out_dir / "script.json",
+        "stringliteral_json": out_dir / "stringliteral.json",
+        "il2cpp_h": out_dir / "il2cpp.h",
+    }
+    missing = [key for key, path in expected.items() if not path.is_file()]
+    if not dummy_dlls:
+        missing.append("DummyDll/*.dll")
+    source_root = tool_dir.parents[3] if len(tool_dir.parents) >= 4 else tool_dir
+    commit = ""
+    try:
+        commit_result = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "HEAD"], capture_output=True,
+            text=True, timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if commit_result.returncode == 0:
+            commit = commit_result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    official_stats = _official_dump_stats(expected["dump_cs"] if expected["dump_cs"].is_file() else None)
+    return {
+        "ok": process.returncode == 0 and not missing,
+        "status": "completed" if process.returncode == 0 and not missing else "official_tool_incomplete",
+        "return_code": process.returncode,
+        "command": command,
+        "stdout_tail": (process.stdout or "")[-4000:],
+        "stderr_tail": (process.stderr or "")[-4000:],
+        "log": str(log_path),
+        "tool": str(executable),
+        "tool_sha256": _sha256_file(executable),
+        "tool_commit": commit,
+        "license": str(source_root / "LICENSE") if (source_root / "LICENSE").is_file() else "",
+        "missing": missing,
+        "registration": registration,
+        "dummy_dir": str(dummy_dir),
+        "dummy_dlls": dummy_dlls,
+        "stats": official_stats,
+        **{key: str(path) if path.is_file() else "" for key, path in expected.items()},
+    }
+
+
+def _official_dump_stats(path: Path | None) -> dict:
+    """Count the authoritative Il2CppDumper text surface for UI/reporting.
+
+    The official CLI produces Dump.cs even when the local fallback parser is
+    intentionally disabled.  Counting its stable TypeDefIndex and method RVA
+    markers prevents the workflow summary from incorrectly reporting 0/0.
+    """
+    if not path or not path.is_file():
+        return {"types": 0, "methods": 0, "fields": 0, "properties": 0, "source": "missing"}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"types": 0, "methods": 0, "fields": 0, "properties": 0, "source": "unreadable"}
+    types = len(re.findall(r"^.*// TypeDefIndex:\s*\d+\s*$", text, re.MULTILINE))
+    methods = len(re.findall(r"^\s*\|-RVA:\s*", text, re.MULTILINE))
+    properties = len(re.findall(r"^\s*(?:public|private|protected|internal).*\{\s*get;", text, re.MULTILINE))
+    fields = len(re.findall(r"^\s*(?:public|private|protected|internal|static|readonly).+;\s*//\s*0x[0-9A-Fa-f]+\s*$", text, re.MULTILINE))
+    return {"types": types, "methods": methods, "fields": fields, "properties": properties, "source": "official_dump.cs"}
+
+
+def _dump_sdk_builtin(meta_path: str, gameassembly_path: str, out_dir: str) -> dict:
     """核心:解析 metadata 并导出 Dump.cs / script.json / sdk_cpp / sdk.json。
 
     解析采用"读取 string 表后,以字符串内嵌的类/方法名构建类型名"的务实做法;
@@ -911,11 +1378,27 @@ def dump_sdk(meta_path: str, gameassembly_path: str, out_dir: str) -> dict:
        "types": n, "methods": n, "fields": n, "version": int, "warnings": [...],
        "stats": {...}}
     """
+    metadata_status = check_metadata_encrypted(meta_path)
+    if metadata_status.get("status") != "plain":
+        return {
+            "ok": False,
+            "status": "metadata_not_usable",
+            "delivery_complete": False,
+            "metadata_status": metadata_status,
+            "error": "metadata is not verified plaintext",
+            "note": "SDK output was not generated because metadata validation failed",
+        }
     try:
         parser = MetadataParser(meta_path)
     except (ValueError, OSError) as e:
-        return {"ok": False, "error": f"metadata 解析失败: {e}",
-                "note": "若为加密 metadata,请先调用 decrypt_metadata"}
+        return {
+            "ok": False,
+            "status": "metadata_not_usable",
+            "delivery_complete": False,
+            "metadata_status": metadata_status,
+            "error": f"metadata 解析失败: {e}",
+            "note": "SDK output was not generated because metadata parsing failed",
+        }
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1000,31 +1483,93 @@ def dump_sdk(meta_path: str, gameassembly_path: str, out_dir: str) -> dict:
         except Exception:  # noqa: BLE001
             pass
 
+    delivery_dir = out_dir / "inputs"
+    metadata_delivery = _deliver_input_file(meta_path, delivery_dir, "global-metadata.dat")
+    metadata_delivery["kind"] = "metadata"
+    gameassembly_delivery = _deliver_input_file(
+        gameassembly_path, delivery_dir, "GameAssembly.dll"
+    )
+    gameassembly_delivery["kind"] = "gameassembly"
+    if not gameassembly_delivery["exists"]:
+        parser.warnings.append("GameAssembly.dll was not available for SDK delivery")
+
+    manifest_path = out_dir / "sdk_manifest.json"
     sdk_data = {
         "ok": True,
+        "status": "completed",
         "version": parser.version,
         "magic_ok": True,
+        "metadata_status": metadata_status,
+        "table_count_semantics": parser.table_count_semantics,
         "stats": stats,
         "warnings": parser.warnings,
         "images": images,
         "namespaces": script_data["Namespace"],
         "script": script_data["Script"],
         "string_literals": script_data["StringLiteral"],
+        "inputs": {
+            "metadata": metadata_delivery,
+            "gameassembly": gameassembly_delivery,
+        },
         "outputs": {
             "dump_cs": str(dump_cs_path),
             "script_json": str(script_json_path),
             "cpp_dir": str(cpp_dir),
+            "cpp_headers": [str(cpp_dir / name) for name in cpp_files],
             "sdk_json": str(sdk_json_path),
+            "manifest": str(manifest_path),
         },
     }
     sdk_json_path.write_text(json.dumps(sdk_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    artifacts = [
+        _artifact("dump_cs", dump_cs_path),
+        _artifact("script_json", script_json_path),
+        _artifact("sdk_json", sdk_json_path),
+        _artifact("cpp_dir", cpp_dir),
+        metadata_delivery,
+        gameassembly_delivery,
+    ]
+    artifacts.extend(_artifact("cpp_header", cpp_dir / name) for name in cpp_files)
+    required_kinds = {"dump_cs", "script_json", "sdk_json", "metadata", "gameassembly"}
+    if types:
+        required_kinds.add("cpp_header")
+    missing_required = [
+        item["kind"] for item in artifacts
+        if item.get("kind") in required_kinds and not item.get("exists")
+    ]
+    if types and not cpp_files:
+        missing_required.append("cpp_header")
+    delivery_complete = not missing_required
+    manifest = {
+        "schema": "revlab.unity.sdk-manifest/v1",
+        "status": "completed" if delivery_complete else "completed_with_missing_artifacts",
+        "delivery_complete": delivery_complete,
+        "metadata_status": metadata_status,
+        "metadata_version": parser.version,
+        "table_count_semantics": parser.table_count_semantics,
+        "stats": stats,
+        "warnings": parser.warnings,
+        "missing_required": missing_required,
+        "artifacts": artifacts,
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
     return {
         "ok": True,
+        "status": manifest["status"],
+        "delivery_complete": delivery_complete,
         "dump_cs": str(dump_cs_path),
         "script_json": str(script_json_path),
         "cpp_dir": str(cpp_dir),
+        "cpp_headers": [str(cpp_dir / name) for name in cpp_files],
         "sdk_json": str(sdk_json_path),
+        "manifest": str(manifest_path),
+        "sdk_manifest": str(manifest_path),
+        "dll": gameassembly_delivery.get("delivery_path", ""),
+        "dll_source": gameassembly_delivery.get("source_path", ""),
+        "metadata": metadata_delivery.get("delivery_path", ""),
+        "metadata_source": metadata_delivery.get("source_path", ""),
         "types": stats["types"],
         "methods": stats["methods"],
         "fields": stats["fields"],
@@ -1032,4 +1577,120 @@ def dump_sdk(meta_path: str, gameassembly_path: str, out_dir: str) -> dict:
         "version": parser.version,
         "warnings": parser.warnings,
         "stats": stats,
+        "artifacts": artifacts,
+        "missing_required": missing_required,
+        "metadata_status": metadata_status,
+    }
+
+
+def dump_sdk(
+    meta_path: str,
+    gameassembly_path: str,
+    out_dir: str,
+    registration: dict | None = None,
+) -> dict:
+    """Generate the authoritative official Il2CppDumper delivery."""
+    metadata_status = check_metadata_encrypted(meta_path)
+    if metadata_status.get("status") != "plain":
+        return {
+            "ok": False, "status": "metadata_not_usable", "delivery_complete": False,
+            "metadata_status": metadata_status,
+            "error": "metadata is not verified plaintext",
+        }
+    out_root = Path(out_dir)
+    builtin = {"status": "not_run", "note": "Official SDK delivery is authoritative."}
+    registration = registration or _pe_registration_addresses(gameassembly_path, meta_path)
+    official = _official_il2cpp_dumper(
+        meta_path, gameassembly_path, out_root, registration=registration
+    )
+    delivery_dir = out_root / "inputs"
+    metadata_delivery = _deliver_input_file(meta_path, delivery_dir, "global-metadata.dat")
+    metadata_delivery["kind"] = "metadata"
+    gameassembly_delivery = _deliver_input_file(gameassembly_path, delivery_dir, "GameAssembly.dll")
+    gameassembly_delivery["kind"] = "gameassembly"
+    artifacts = [metadata_delivery, gameassembly_delivery]
+    for kind, raw in (
+        ("dump_cs", official.get("dump_cs")), ("script_json", official.get("script_json")),
+        ("stringliteral_json", official.get("stringliteral_json")),
+        ("il2cpp_h", official.get("il2cpp_h")), ("dummy_dir", official.get("dummy_dir")),
+        ("official_log", official.get("log")),
+    ):
+        if raw:
+            artifacts.append(_artifact(kind, raw))
+    artifacts.extend(_artifact("dummy_dll", path) for path in official.get("dummy_dlls", []))
+    missing = list(official.get("missing", []))
+    if not metadata_delivery.get("exists"):
+        missing.append("global-metadata.dat")
+    if not gameassembly_delivery.get("exists"):
+        missing.append("GameAssembly.dll")
+    delivery_complete = bool(official.get("ok") and not missing)
+    sdk_json_path = out_root / "sdk.json"
+    official_stats = official.get("stats") or {"types": 0, "methods": 0, "fields": 0, "properties": 0, "source": "missing"}
+    sdk_json_path.write_text(json.dumps({
+        "schema": "revlab.unity.official-sdk-index/v1",
+        "delivery_complete": delivery_complete,
+        "metadata": metadata_delivery,
+        "gameassembly": gameassembly_delivery,
+        "registration": registration,
+        "stats": official_stats,
+        "official_tool": {
+            "path": official.get("tool", ""),
+            "sha256": official.get("tool_sha256", ""),
+            "commit": official.get("tool_commit", ""),
+            "return_code": official.get("return_code"),
+        },
+        "outputs": {
+            "dump_cs": official.get("dump_cs", ""),
+            "script_json": official.get("script_json", ""),
+            "stringliteral_json": official.get("stringliteral_json", ""),
+            "il2cpp_h": official.get("il2cpp_h", ""),
+            "dummy_dir": official.get("dummy_dir", ""),
+            "dummy_dlls": official.get("dummy_dlls", []),
+        },
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    artifacts.append(_artifact("sdk_json", sdk_json_path))
+    manifest_path = out_root / "sdk_manifest.json"
+    manifest = {
+        "schema": "revlab.unity.sdk-manifest/v2",
+        "status": "completed" if delivery_complete else "failed",
+        "delivery_complete": delivery_complete,
+        "metadata_status": metadata_status,
+        "registration": registration,
+        "stats": official_stats,
+        "official_tool": official,
+        "builtin_diagnostics": builtin,
+        "missing_required": missing,
+        "artifacts": artifacts,
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "ok": delivery_complete,
+        "status": manifest["status"],
+        "delivery_complete": delivery_complete,
+        "dump_cs": official.get("dump_cs", ""),
+        "script_json": official.get("script_json", ""),
+        "stringliteral_json": official.get("stringliteral_json", ""),
+        "il2cpp_h": official.get("il2cpp_h", ""),
+        "sdk_json": str(sdk_json_path),
+        "cpp_dir": builtin.get("cpp_dir", ""),
+        "cpp_headers": builtin.get("cpp_headers", []),
+        "dummy_dir": official.get("dummy_dir", ""),
+        "dummy_dlls": official.get("dummy_dlls", []),
+        "dll": gameassembly_delivery.get("delivery_path", ""),
+        "dll_source": gameassembly_delivery.get("source_path", ""),
+        "metadata": metadata_delivery.get("delivery_path", ""),
+        "metadata_source": metadata_delivery.get("source_path", ""),
+        "manifest": str(manifest_path),
+        "sdk_manifest": str(manifest_path),
+        "types": official_stats.get("types", 0),
+        "methods": official_stats.get("methods", 0),
+        "fields": official_stats.get("fields", 0),
+        "properties": official_stats.get("properties", 0),
+        "stats": official_stats,
+        "metadata_status": metadata_status,
+        "registration": registration,
+        "official_tool": official,
+        "artifacts": artifacts,
+        "missing_required": missing,
+        "warnings": builtin.get("warnings", []),
     }

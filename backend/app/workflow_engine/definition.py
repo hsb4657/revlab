@@ -1,11 +1,14 @@
-"""图工作流定义:数据模型校验 + 执行计划构建"""
+"""Graph workflow validation and deterministic planning."""
 from __future__ import annotations
-import uuid
 
-# 内置/控制节点类型
+import uuid
+from collections import deque
+
+from .conditions import validate_expression
+from .nodes.base import get_node_class
+
 CONTROL_TYPES = {"condition", "approval", "script", "subflow", "report", "start", "end"}
 
-# 节点状态
 NODE_PENDING = "pending"
 NODE_RUNNING = "running"
 NODE_COMPLETED = "completed"
@@ -13,10 +16,11 @@ NODE_FAILED = "failed"
 NODE_SKIPPED = "skipped"
 NODE_WAITING_APPROVAL = "waiting_approval"
 NODE_RETRY_WAITING = "retry_waiting"
-NODE_STATES = {NODE_PENDING, NODE_RUNNING, NODE_COMPLETED, NODE_FAILED,
-               NODE_SKIPPED, NODE_WAITING_APPROVAL, NODE_RETRY_WAITING}
+NODE_STATES = {
+    NODE_PENDING, NODE_RUNNING, NODE_COMPLETED, NODE_FAILED,
+    NODE_SKIPPED, NODE_WAITING_APPROVAL, NODE_RETRY_WAITING,
+}
 
-# 任务状态
 TASK_PENDING = "pending"
 TASK_RUNNING = "running"
 TASK_COMPLETED = "completed"
@@ -28,84 +32,130 @@ def gen_id(prefix: str = "n") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
-def validate_graph(nodes: list, edges: list) -> tuple:
-    """校验图结构。返回 (valid, errors[])。"""
-    errors = []
+def validate_graph(nodes: list, edges: list, variables: list | None = None) -> tuple[bool, list[str]]:
+    """Validate graph structure, node types, expressions, variables and cycles."""
+    errors: list[str] = []
     if not nodes:
         return False, ["节点列表为空"]
+
     ids = [n.get("id") for n in nodes]
-    if len(ids) != len(set(ids)):
+    node_ids = set(ids)
+    if any(not isinstance(i, str) or not i.strip() for i in ids):
+        errors.append("节点 ID 不能为空")
+    if len(ids) != len(node_ids):
         errors.append("节点 ID 重复")
-    # 边引用的节点必须存在
-    edge_ids = {e.get("from") for e in edges} | {e.get("to") for e in edges}
-    for rid in edge_ids:
-        if rid not in ids:
-            errors.append(f"边引用不存在的节点: {rid}")
-    # 每个非终止节点至少一条出边
-    terminal = {"end", "report"}
-    for n in nodes:
-        nid = n.get("id")
-        if n.get("type") in terminal:
-            continue
-        if not any(e.get("from") == nid for e in edges):
-            errors.append(f"节点 {nid} 没有出边(孤立/无后继)")
-    # 条件节点至少 1 条默认出边
-    for n in nodes:
-        if n.get("type") == "condition":
-            outs = [e for e in edges if e.get("from") == n["id"]]
-            if not outs:
-                errors.append(f"条件节点 {n['id']} 无出边")
-            elif not any(e.get("is_default") for e in outs):
-                errors.append(f"条件节点 {n['id']} 缺少默认分支(is_default)")
-    return (not errors), errors
 
+    edge_ids = [e.get("id") for e in edges]
+    if any(not isinstance(i, str) or not i.strip() for i in edge_ids):
+        errors.append("边 ID 不能为空")
+    if len(edge_ids) != len(set(edge_ids)):
+        errors.append("边 ID 重复")
+    edge_pairs = [(e.get("from"), e.get("to")) for e in edges]
+    if len(edge_pairs) != len(set(edge_pairs)):
+        errors.append("边连接重复；同一对节点只能保留一条边")
 
-def build_execution_plan(nodes: list, edges: list) -> list:
-    """拓扑排序执行计划(从 start/首节点开始,BFS 依边推进)。
-    返回节点 id 列表;condition 节点仅列出,分支由引擎运行时决定。
-    """
-    node_map = {n["id"]: n for n in nodes}
-    in_degree = {n["id"]: 0 for n in nodes}
-    adj = {n["id"]: [] for n in nodes}
-    for e in edges:
-        adj.setdefault(e.get("from"), []).append(e.get("to"))
-        in_degree[e["to"]] = in_degree.get(e["to"], 0) + 1
-    # 起点:没有入边的节点(或显式 start)
-    starts = [n["id"] for n in nodes if in_degree.get(n["id"], 0) == 0]
-    if not starts:
-        starts = [nodes[0]["id"]]
-    # Kahn 拓扑排序
-    from collections import deque
-    q = deque(starts)
-    order = []
-    visited = set()
-    # 避免 condition 后两条边都算(条件只走一条),这里 plan 给"可达骨架"
-    used_edges = set()
-    while q:
-        nid = q.popleft()
-        if nid in visited:
+    for node in nodes:
+        node_id = node.get("id")
+        node_type = node.get("type")
+        if not node_type:
+            errors.append(f"节点 {node_id} 缺少 type")
+        elif node_type not in CONTROL_TYPES and get_node_class(node_type) is None:
+            errors.append(f"未知节点类型: {node_type}")
+
+    for edge in edges:
+        source, target = edge.get("from"), edge.get("to")
+        if source not in node_ids:
+            errors.append(f"边 {edge.get('id')} 引用了不存在的源节点: {source}")
+        if target not in node_ids:
+            errors.append(f"边 {edge.get('id')} 引用了不存在的目标节点: {target}")
+        if source == target:
+            errors.append(f"边 {edge.get('id')} 不能连接自身")
+
+    terminal = {"end", "report", "ue_report", "unity_report"}
+    for node in nodes:
+        node_id = node.get("id")
+        if node.get("type") not in terminal and not any(e.get("from") == node_id for e in edges):
+            errors.append(f"节点 {node_id} 没有出边")
+
+    for node in nodes:
+        if node.get("type") != "condition":
             continue
-        visited.add(nid)
-        order.append(nid)
-        for to in adj.get(nid, []):
-            if to in visited:
-                continue
-            # 条件节点:所有出边目标都作为候选(运行时选一)
-            if node_map.get(nid, {}).get("type") == "condition":
-                if to not in visited:
-                    q.append(to)
+        outs = [e for e in edges if e.get("from") == node.get("id")]
+        if not outs:
+            errors.append(f"条件节点 {node.get('id')} 没有出边")
+            continue
+        defaults = [e for e in outs if e.get("is_default")]
+        if len(defaults) != 1:
+            errors.append(f"条件节点 {node.get('id')} 必须有且只有一个默认分支")
+        for edge in outs:
+            if edge.get("is_default"):
+                if edge.get("condition"):
+                    errors.append(f"默认分支 {edge.get('id')} 不应配置 condition")
+            elif not edge.get("condition"):
+                errors.append(f"条件分支 {edge.get('id')} 缺少 condition")
             else:
-                q.append(to)
-    # 补上未被遍历的孤立节点(以防)
-    for n in nodes:
-        if n["id"] not in order:
-            order.append(n["id"])
+                syntax_error = validate_expression(edge["condition"])
+                if syntax_error:
+                    errors.append(f"边 {edge.get('id')} 条件表达式错误: {syntax_error}")
+
+    indegree = {node_id: 0 for node_id in node_ids}
+    adjacency = {node_id: [] for node_id in node_ids}
+    for edge in edges:
+        if edge.get("from") in node_ids and edge.get("to") in node_ids:
+            adjacency[edge["from"]].append(edge["to"])
+            indegree[edge["to"]] += 1
+    queue = deque(node_id for node_id, degree in indegree.items() if degree == 0)
+    topo_count = 0
+    while queue:
+        current = queue.popleft()
+        topo_count += 1
+        for child in adjacency[current]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                queue.append(child)
+    if topo_count != len(node_ids):
+        errors.append("工作流包含环；循环必须使用显式 loop 节点")
+
+    roots = [node_id for node_id in node_ids if not any(e.get("to") == node_id for e in edges)]
+    if len(roots) != 1:
+        errors.append(f"工作流必须有唯一入口，当前发现 {len(roots)} 个入口")
+
+    if variables is not None:
+        keys = [v.get("key") for v in variables]
+        if any(not isinstance(k, str) or not k.strip() for k in keys):
+            errors.append("变量 key 不能为空")
+        if len(keys) != len(set(keys)):
+            errors.append("变量 key 重复")
+        for variable in variables:
+            if variable.get("type", "text") not in {"text", "number", "bool", "json"}:
+                errors.append(f"变量 {variable.get('key')} 类型无效")
+
+    return not errors, errors
+
+
+def build_execution_plan(nodes: list, edges: list) -> list[str]:
+    """Return a topological plan. Invalid cyclic graphs return reachable order only."""
+    node_ids = [node["id"] for node in nodes]
+    indegree = {node_id: 0 for node_id in node_ids}
+    adjacency = {node_id: [] for node_id in node_ids}
+    for edge in edges:
+        if edge.get("from") in adjacency and edge.get("to") in indegree:
+            adjacency[edge["from"]].append(edge["to"])
+            indegree[edge["to"]] += 1
+    queue = deque(node_id for node_id in node_ids if indegree[node_id] == 0)
+    order: list[str] = []
+    while queue:
+        node_id = queue.popleft()
+        order.append(node_id)
+        for child in adjacency[node_id]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                queue.append(child)
     return order
 
 
 def default_edges_after_condition(edges: list, node_id: str) -> str | None:
-    """条件节点的默认出边目标。"""
-    for e in edges:
-        if e.get("from") == node_id and e.get("is_default"):
-            return e.get("to")
+    for edge in edges:
+        if edge.get("from") == node_id and edge.get("is_default"):
+            return edge.get("to")
     return None

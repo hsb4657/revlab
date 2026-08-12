@@ -11,9 +11,25 @@ from ..orchestrator.pipeline import analyze_in_background
 from ..services import report as report_svc
 from ..services import workflow as wf_svc
 from ..services.disassembler import disassemble_at
+from ..services.environment import ensure_environment_async
 from ..services.ghidra_bridge import find_ghidra_home
 
 router = APIRouter(prefix="/api")
+
+
+def _require_execution_environment() -> dict:
+    """Start automatic setup when needed and stop work until requirements are ready."""
+    environment = ensure_environment_async()
+    if not environment.get("ready"):
+        raise HTTPException(
+            503,
+            {
+                "message": "Environment setup is in progress",
+                "missing": environment.get("missing", []),
+                "job": environment.get("job", {}),
+            },
+        )
+    return environment
 
 
 @router.post("/samples/upload")
@@ -93,12 +109,44 @@ def trigger_analyze(sample_id: int, workflow: str = Query("full-auto", descripti
     wf = wf_svc.get_workflow(workflow) or wf_svc.default_workflow()
     if not wf.get("enabled", True):
         raise HTTPException(400, f"workflow '{workflow}' is disabled")
+    _require_execution_environment()
     if sync:
         from ..orchestrator.pipeline import Runner
         return Runner(sample_id, workflow=wf).run(resume=True)
     analyze_in_background(sample_id, wf)
     return {"ok": True, "status": "queued", "workflow": workflow,
             "stages": [s_["name"] for s_ in wf["stages"] if s_.get("enabled", True)]}
+
+
+@router.get("/samples/{sample_id}/graph-runs")
+def list_sample_graph_runs(sample_id: int, limit: int = Query(100, ge=1, le=500)):
+    """List graph workflow runs associated with a sample."""
+    from ..workflow_engine import manager as graph_manager
+    return graph_manager.list_sample_tasks(sample_id, limit)
+
+
+@router.post("/samples/{sample_id}/graph-runs")
+def create_sample_graph_run(sample_id: int, payload: dict):
+    """Create and optionally start a graph workflow with sample inputs injected."""
+    from ..workflow_engine import manager as graph_manager
+
+    workflow_id = int(payload.get("workflow_id") or 0)
+    if not workflow_id:
+        raise HTTPException(400, "workflow_id is required")
+    try:
+        if payload.get("start", True):
+            _require_execution_environment()
+        created = graph_manager.create_task(
+            workflow_id,
+            payload.get("name", ""),
+            payload.get("variables") or {},
+            sample_id=sample_id,
+        )
+        if payload.get("start", True):
+            graph_manager.run_task(created["id"])
+        return {**created, "sample_id": sample_id, "status": "started" if payload.get("start", True) else "pending"}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @router.get("/samples/{sample_id}/disassembly")
@@ -161,6 +209,8 @@ def delete_sample(sample_id: int, db: Session = Depends(get_db)):
 @router.get("/status")
 def status():
     from ..services.ghidra_bridge import ghidra_available
+    from ..services.environment import inspect_environment
+    environment = inspect_environment()
     return {
         "ok": True,
         "ghidra": bool(ghidra_available()) and find_ghidra_home(),
@@ -170,7 +220,21 @@ def status():
         "pktmon": True,
         "sandbox_mode": "vmware" if config.USE_SANDBOX_VM else "local",
         "stages": wf_svc.DEFAULT_STAGE_ORDER,
+        "environment_ready": environment["ready"],
+        "environment_missing": environment["missing"],
     }
+
+
+@router.get("/environment")
+def environment_status():
+    from ..services.environment import inspect_environment
+    return inspect_environment()
+
+
+@router.post("/environment/prepare")
+def environment_prepare(payload: dict = None):
+    from ..services.environment import prepare_environment
+    return prepare_environment(bool((payload or {}).get("force")))
 
 
 # ================================================================ 工作流
@@ -265,17 +329,206 @@ def ai_test(payload: dict):
 
 @router.post("/ai/chat")
 def ai_chat(payload: dict):
-    from ..services import ai
-    messages = payload.get("messages", [])
-    if not messages:
-        raise HTTPException(400, "messages required")
-    cfg = ai.load_config()
-    if not cfg.get("enabled") or not cfg.get("api_key"):
-        raise HTTPException(400, "AI 未配置或未启用")
+    """Compatibility endpoint for the original stateless chat client.
+
+    Supplying ``session_id`` upgrades the same call into a durable turn while
+    preserving the historical ``messages`` payload for existing clients.
+    """
+    from ..services import ai_workflow
     try:
-        return {"reply": ai.chat(cfg, messages)}
-    except Exception as e:
-        raise HTTPException(502, str(e))
+        session_id = payload.get("session_id")
+        if session_id:
+            content = payload.get("content") or payload.get("message")
+            if not content:
+                for item in reversed(payload.get("messages") or []):
+                    if isinstance(item, dict) and item.get("role") == "user":
+                        content = item.get("content")
+                        break
+            return ai_workflow.send_chat_message(
+                str(session_id), content or "", model=payload.get("model"),
+                reasoning=payload.get("reasoning"), sample_id=payload.get("sample_id"),
+            )
+        reply = ai_workflow.chat_with_overrides(
+            payload.get("messages", []), model=payload.get("model", ""),
+            reasoning=payload.get("reasoning", "balanced"),
+        )
+        return {"reply": reply}
+    except ai_workflow.AIWorkflowError as exc:
+        raise HTTPException(exc.status_code, {
+            "code": exc.code, "message": str(exc), "warnings": exc.warnings,
+        })
+
+
+# ================================================================ AI persistent conversations
+@router.get("/ai/sessions")
+def ai_sessions_list(limit: int = Query(100, ge=1, le=1000)):
+    from ..services import ai_workflow
+    return {"sessions": ai_workflow.list_chat_sessions(limit)}
+
+
+@router.post("/ai/sessions")
+def ai_sessions_create(payload: dict = None):
+    from ..services import ai_workflow
+    data = payload or {}
+    try:
+        session = ai_workflow.create_chat_session(
+            title=data.get("title", data.get("name", "")),
+            model=data.get("model", ""),
+            reasoning=data.get("reasoning", "balanced"),
+            sample_id=data.get("sample_id", 0),
+            system_prompt=data.get("system_prompt", ""),
+        )
+        return {"ok": True, "session": session}
+    except ai_workflow.AIWorkflowError as exc:
+        raise HTTPException(exc.status_code, {
+            "code": exc.code, "message": str(exc), "warnings": exc.warnings,
+        })
+
+
+@router.get("/ai/sessions/{session_id}")
+def ai_sessions_get(session_id: str, include_messages: bool = Query(True)):
+    from ..services import ai_workflow
+    try:
+        return ai_workflow.get_chat_session(session_id, include_messages)
+    except ai_workflow.AIWorkflowError as exc:
+        raise HTTPException(exc.status_code, {"code": exc.code, "message": str(exc)})
+
+
+@router.patch("/ai/sessions/{session_id}")
+def ai_sessions_update(session_id: str, payload: dict = None):
+    from ..services import ai_workflow
+    data = payload or {}
+    changes = {key: data[key] for key in ("model", "reasoning", "sample_id", "system_prompt") if key in data}
+    if "title" in data or "name" in data:
+        changes["title"] = data.get("title", data.get("name"))
+    try:
+        return {"ok": True, "session": ai_workflow.update_chat_session(session_id, **changes)}
+    except ai_workflow.AIWorkflowError as exc:
+        raise HTTPException(exc.status_code, {
+            "code": exc.code, "message": str(exc), "warnings": exc.warnings,
+        })
+
+
+@router.delete("/ai/sessions/{session_id}")
+def ai_sessions_delete(session_id: str):
+    from ..services import ai_workflow
+    try:
+        ai_workflow.delete_chat_session(session_id)
+        return {"ok": True}
+    except ai_workflow.AIWorkflowError as exc:
+        raise HTTPException(exc.status_code, {"code": exc.code, "message": str(exc)})
+
+
+@router.post("/ai/sessions/{session_id}/messages")
+def ai_sessions_send(session_id: str, payload: dict = None):
+    from ..services import ai_workflow
+    data = payload or {}
+    try:
+        return ai_workflow.send_chat_message(
+            session_id, data.get("content", data.get("message", "")),
+            model=data.get("model") if "model" in data else None,
+            reasoning=data.get("reasoning") if "reasoning" in data else None,
+            sample_id=data.get("sample_id") if "sample_id" in data else None,
+        )
+    except ai_workflow.AIWorkflowError as exc:
+        raise HTTPException(exc.status_code, {
+            "code": exc.code, "message": str(exc), "warnings": exc.warnings,
+        })
+
+
+@router.post("/ai/sessions/{session_id}/compress")
+def ai_sessions_compress(session_id: str, payload: dict = None):
+    from ..services import ai_workflow
+    data = payload or {}
+    try:
+        return ai_workflow.compact_chat_session(
+            session_id, force=bool(data.get("force", True)), use_ai=bool(data.get("use_ai", True)),
+        )
+    except ai_workflow.AIWorkflowError as exc:
+        raise HTTPException(exc.status_code, {
+            "code": exc.code, "message": str(exc), "warnings": exc.warnings,
+        })
+
+
+# ================================================================ AI workflow drafts
+@router.post("/ai/workflows/generate")
+def ai_workflows_generate(payload: dict, db: Session = Depends(get_db)):
+    from ..services import ai_workflow
+    prompt = (payload or {}).get("prompt", "")
+    sample_id = (payload or {}).get("sample_id", 0)
+    sample_context = None
+    if sample_id:
+        try:
+            sid = int(sample_id)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "sample_id must be an integer")
+        sample = db.query(Sample).filter(Sample.id == sid).first()
+        if not sample:
+            raise HTTPException(404, "sample not found")
+        sample_context = {
+            "id": sample.id, "file_name": sample.file_name, "file_size": sample.file_size,
+            "sha256": sample.sha256, "arch": sample.arch, "is_pe": bool(sample.is_pe),
+            "packer_verdict": sample.packer_verdict, "summary": sample.summary or {},
+        }
+    try:
+        return ai_workflow.generate_workflow(prompt, sample=sample_context)
+    except ai_workflow.AIWorkflowError as exc:
+        raise HTTPException(exc.status_code, {
+            "code": exc.code, "message": str(exc), "warnings": exc.warnings,
+        })
+
+
+@router.post("/ai/workflows/save")
+def ai_workflows_save(payload: dict):
+    """Persist an AI draft only after the same graph validation used by wf2."""
+    from ..services import ai_workflow
+    from ..workflow_engine import manager as graph_manager
+    data = payload or {}
+    raw = data.get("workflow") if isinstance(data.get("workflow"), dict) else data
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "workflow object required")
+    try:
+        graph, warnings = ai_workflow.prepare_workflow_definition(raw, repair=False)
+        workflow_id = data.get("workflow_id", raw.get("id"))
+        if workflow_id:
+            try:
+                workflow_id = int(workflow_id)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(400, "workflow_id must be an integer") from exc
+            saved = graph_manager.update_workflow(
+                workflow_id, name=graph["name"], description=graph["description"],
+                nodes=graph["nodes"], edges=graph["edges"], variables=graph["variables"],
+            )
+            action = "updated"
+        else:
+            # Drafts must be saveable repeatedly. Add a readable suffix rather
+            # than rejecting a second custom workflow with the same draft name.
+            existing = {str(row.get("name", "")).lower() for row in graph_manager.list_workflows()}
+            base = graph["name"]
+            name = base
+            index = 2
+            while name.lower() in existing:
+                suffix = f" {index}"
+                name = base[:64 - len(suffix)] + suffix
+                index += 1
+            graph["name"] = name
+            saved = graph_manager.create_workflow(
+                graph["name"], graph["description"], graph["nodes"], graph["edges"], graph["variables"],
+            )
+            workflow_id = saved["id"]
+            action = "created"
+        graph["id"] = int(workflow_id)
+        return {
+            "ok": True, "id": int(workflow_id), "action": action, "workflow": graph,
+            "nodes": graph["nodes"], "edges": graph["edges"], "variables": graph["variables"],
+            "warnings": warnings, "generator": data.get("generator", "ai-draft"), "editable": True,
+        }
+    except ai_workflow.AIWorkflowError as exc:
+        raise HTTPException(exc.status_code, {
+            "code": exc.code, "message": str(exc), "warnings": exc.warnings,
+        })
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @router.post("/ai/summarize/{sample_id}")
@@ -361,6 +614,7 @@ def ue_analyze(sample_id: int, version: str = Query("", description="指定 UE �
                report: bool = Query(True, description="同时生成报告文件")):
     from ..services.ue.analyzer import analyze_sample, ue_report
     try:
+        _require_execution_environment()
         if report:
             return ue_report(sample_id, version=version)
         return {"ok": True, "result": analyze_sample(sample_id, version=version)}
@@ -419,6 +673,7 @@ def engine_analyze(engine: str, payload: dict):
             raise HTTPException(404, f"路径不存在: {target_path}")
         target_name = p.name
     try:
+        _require_execution_environment()
         return start_analysis(engine, target_name, target_path, sample_id=sample_id,
                               version=version, params=params)
     except ValueError as e:
@@ -450,6 +705,7 @@ def engine_analysis_rerun(engine: str, aid: int):
     if not a or a["engine"] != engine:
         raise HTTPException(404, "not found")
     _load_engine(engine)
+    _require_execution_environment()
     return start_analysis(engine, a["target_name"], a["target_path"],
                           sample_id=a["sample_id"], version=a["version"],
                           params=(a["result"] or {}).get("_params", {}))

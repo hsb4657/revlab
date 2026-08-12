@@ -1,5 +1,14 @@
 /* REVLab 前端逻辑 */
 const $ = (sel) => document.querySelector(sel);
+async function aiRequest(url, options = {}) {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = data.detail || data || {};
+    throw new Error(detail.message || detail.error || JSON.stringify(detail) || `HTTP ${response.status}`);
+  }
+  return data;
+}
 const api = {
   list: () => fetch('/api/samples').then(r => r.json()),
   get: (id) => fetch(`/api/samples/${id}`).then(r => r.json()),
@@ -25,6 +34,15 @@ const api = {
   aiTest: (d) => fetch('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }).then(r => r.json()),
   aiChat: (msgs) => fetch('/api/ai/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: msgs }) }).then(r => r.json()),
   aiSummarize: (id, prompt) => fetch(`/api/ai/summarize/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }) }).then(r => r.json()),
+  aiSessions: () => aiRequest('/api/ai/sessions'),
+  aiSession: (id) => aiRequest(`/api/ai/sessions/${encodeURIComponent(id)}`),
+  aiSessionCreate: (d = {}) => aiRequest('/api/ai/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
+  aiSessionSave: (id, d) => aiRequest(`/api/ai/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
+  aiSessionDelete: (id) => aiRequest(`/api/ai/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  aiSessionSend: (id, d) => aiRequest(`/api/ai/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
+  aiSessionCompress: (id, d = {}) => aiRequest(`/api/ai/sessions/${encodeURIComponent(id)}/compress`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
+  aiWorkflowGenerate: (prompt, sampleId) => aiRequest('/api/ai/workflows/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, sample_id: sampleId || 0 }) }),
+  aiWorkflowSave: (d) => aiRequest('/api/ai/workflows/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
   engineSpec: (e) => fetch(`/api/engine/${e}/spec`).then(r => r.json()),
   engineAnalyze: (e, body) => fetch(`/api/engine/${e}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json()),
   engineList: (e) => fetch(`/api/engine/${e}/analyses`).then(r => r.json()),
@@ -34,12 +52,38 @@ const api = {
   ueVersions: () => fetch('/api/ue/versions').then(r => r.json()),
   ueVersion: (ver) => fetch(`/api/ue/version/${encodeURIComponent(ver)}`).then(r => r.json()),
   ueSignatures: () => fetch('/api/ue/signatures').then(r => r.json()),
+  environment: () => aiRequest('/api/environment'),
+  prepareEnvironment: (force = false) => aiRequest('/api/environment/prepare', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force }),
+  }),
+  artifactRuns: () => aiRequest('/api/artifacts'),
+  graphArtifacts: (taskId) => aiRequest(`/api/artifacts/${encodeURIComponent(taskId)}`),
+  engineArtifacts: (engine, analysisId) => aiRequest(`/api/artifacts/engine/${encodeURIComponent(engine)}/${encodeURIComponent(analysisId)}`),
+  openGraphArtifact: (taskId, artifactId, folder = false) => aiRequest(`/api/artifacts/${encodeURIComponent(taskId)}/${folder ? 'open-folder' : 'open'}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ artifact_id: artifactId }),
+  }),
+  openEngineArtifact: (engine, analysisId, artifactId, folder = false) => aiRequest(`/api/artifacts/engine/${encodeURIComponent(engine)}/${encodeURIComponent(analysisId)}/${folder ? 'open-folder' : 'open'}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ artifact_id: artifactId }),
+  }),
+  openGraphRunFolder: (taskId) => aiRequest(`/api/artifacts/${encodeURIComponent(taskId)}/open-run-folder`, { method: 'POST' }),
+  openEngineRunFolder: (engine, analysisId) => aiRequest(`/api/artifacts/engine/${encodeURIComponent(engine)}/${encodeURIComponent(analysisId)}/open-run-folder`, { method: 'POST' }),
+  openOutputRoot: () => aiRequest('/api/artifacts/open-output-root', { method: 'POST' }),
 };
 
 let current = null;
 let pollTimer = null;
 let wfMeta = {};
 let currentWfName = 'full-auto';
+let aiMessages = [];
+let aiSessions = [];
+let currentAiSessionId = null;
+let environmentSnapshot = null;
+let environmentTimer = null;
+let artifactRuns = [];
+let selectedArtifactRun = null;
+let artifactRefreshTimer = null;
+let artifactRefreshInFlight = null;
+let artifactRefreshQueuedOptions = null;
 
 function badge(ok) { return ok ? '<span class="badge ok">✓</span>' : '<span class="badge bad">✗</span>'; }
 function ent(score) {
@@ -56,6 +100,10 @@ document.querySelectorAll('.nav-btn').forEach(b => {
     document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     $('#view-' + b.dataset.view).classList.add('active');
+    if (b.dataset.view === 'settings') {
+      loadSettings();
+      loadArtifactRuns();
+    }
   };
 });
 
@@ -233,6 +281,24 @@ $('#btn-analyze').onclick = async () => {
   }
 };
 
+$('#btn-graph-run').onclick = () => {
+  if (!current) return;
+  const frame = $('#workflow-frame');
+  frame.src = `/wf/?embedded=1&sample_id=${encodeURIComponent(current)}`;
+  document.querySelector('.nav-btn[data-view="workflows"]').click();
+};
+
+document.querySelectorAll('[data-graph-workflow]').forEach((button) => {
+  button.onclick = () => {
+    const choice = button.dataset.graphWorkflow;
+    document.querySelectorAll('[data-graph-workflow]').forEach((b) => b.classList.toggle('active', b === button));
+    const frame = $('#workflow-frame');
+    const sample = current ? `&sample_id=${encodeURIComponent(current)}` : '';
+    if (choice === 'new') frame.src = `/wf/?embedded=1&new=1${sample}`;
+    else frame.src = `/wf/?embedded=1&workflow=${encodeURIComponent(choice)}${sample}`;
+  };
+});
+
 $('#btn-disasm').onclick = async () => {
   if (!current) return;
   const s = await api.get(current);
@@ -265,6 +331,8 @@ $('#btn-report').onclick = () => {
   if (current) window.open(`/api/samples/${current}/report?fmt=html`, '_blank');
 };
 
+if ($('#btn-sample-output')) $('#btn-sample-output').onclick = () => openConfiguredOutputRoot($('#set-status'));
+
 $('#btn-del').onclick = async () => {
   if (!current) return;
   if (!confirm('确认删除该样本及其分析记录?')) return;
@@ -279,9 +347,10 @@ async function loadWorkflowUI() {
   const wfs = await api.wfList();
   wfMeta = await api.wfMeta();
   const sel = $('#wf-select');
-  sel.innerHTML = wfs.map(w => `<option value="${esc(w.name)}">${esc(w.name)}${w.is_default ? ' (默认)' : ''}</option>`).join('');
   const upSel = $('#upload-workflow');
   upSel.innerHTML = wfs.map(w => `<option value="${esc(w.name)}">${esc(w.name)}${w.is_default ? ' (默认)' : ''}</option>`).join('');
+  if (!sel) return;
+  sel.innerHTML = wfs.map(w => `<option value="${esc(w.name)}">${esc(w.name)}${w.is_default ? ' (默认)' : ''}</option>`).join('');
   sel.onchange = () => { currentWfName = sel.value; renderWorkflowEditor(); };
   renderWorkflowEditor();
 }
@@ -346,13 +415,13 @@ function collectWorkflow() {
   return { name, description: desc, stages };
 }
 
-$('#btn-wf-new').onclick = () => {
+if ($('#btn-wf-new')) $('#btn-wf-new').onclick = () => {
   const n = prompt('新工作流名称(英文/数字/中划线):', 'my-flow');
   if (!n) return;
   api.wfCreate({ name: n }).then(r => { if (r.ok) { currentWfName = n; loadWorkflowUI(); } else alert('创建失败: ' + (r.detail || '')); });
 };
 
-$('#btn-wf-save').onclick = async () => {
+if ($('#btn-wf-save')) $('#btn-wf-save').onclick = async () => {
   const d = collectWorkflow();
   if (!d.name) { alert('请填写工作流名称'); return; }
   const r = await api.wfSave(d.name, d);
@@ -360,14 +429,14 @@ $('#btn-wf-save').onclick = async () => {
   else alert('保存失败: ' + (r.detail || ''));
 };
 
-$('#btn-wf-del').onclick = async () => {
+if ($('#btn-wf-del')) $('#btn-wf-del').onclick = async () => {
   const w = $('#wf-select').value;
   if (!confirm(`删除工作流「${w}」?`)) return;
   const r = await api.wfDel(w);
   if (r.ok) { currentWfName = 'full-auto'; loadWorkflowUI(); } else alert(r.detail || '删除失败');
 };
 
-$('#btn-wf-toggle').onclick = async () => {
+if ($('#btn-wf-toggle')) $('#btn-wf-toggle').onclick = async () => {
   const w = $('#wf-select').value;
   const wfs = await api.wfList();
   const cur = wfs.find(x => x.name === w);
@@ -387,12 +456,219 @@ function renderWfPreview(w) {
 
 /* ---------------- AI 模型 ---------------- */
 async function loadAI() {
-  const c = await api.aiGet();
-  $('#ai-enabled').checked = c.enabled;
-  $('#ai-base').value = c.base_url || '';
-  $('#ai-key').value = c.api_key && c.api_key !== '***' ? c.api_key : '';
-  $('#ai-model').value = c.model || '';
-  $('#ai-temp').value = c.temperature ?? 0.2;
+  try {
+    const c = await api.aiGet();
+    $('#ai-enabled').checked = c.enabled;
+    $('#ai-base').value = c.base_url || '';
+    $('#ai-key').value = c.api_key && c.api_key !== '***' ? c.api_key : '';
+    $('#ai-model').value = c.model || '';
+    $('#ai-temp').value = c.temperature ?? 0.2;
+    $('#ai-max-tokens').value = c.max_tokens ?? 2400;
+    setReasoningFromConfig(c);
+    syncAiChatControls();
+  } catch (e) {
+    $('#ai-status').textContent = String(e.message || e);
+  }
+  await loadAiSessions();
+}
+const AI_PROVIDERS = {
+  openai: { base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  deepseek: { base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  qwen: { base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+  zhipu: { base_url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
+  moonshot: { base_url: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
+  siliconflow: { base_url: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-72B-Instruct' },
+  gemini: { base_url: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash' },
+  openrouter: { base_url: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
+  groq: { base_url: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
+  together: { base_url: 'https://api.together.xyz/v1', model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
+  mistral: { base_url: 'https://api.mistral.ai/v1', model: 'mistral-small-latest' },
+  perplexity: { base_url: 'https://api.perplexity.ai', model: 'sonar' },
+  azure: { base_url: 'https://YOUR-RESOURCE.openai.azure.com/openai/v1', model: 'YOUR-DEPLOYMENT', fillable: true },
+  anthropic: { base_url: '', model: '', proxy: true },
+  ollama: { base_url: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b' },
+  lmstudio: { base_url: 'http://127.0.0.1:1234/v1', model: 'local-model' },
+};
+const AI_MODEL_PRESETS = {
+  openai: ['gpt-4o-mini', 'gpt-4o', 'o3-mini'], deepseek: ['deepseek-chat', 'deepseek-reasoner'],
+  qwen: ['qwen-plus', 'qwen-max', 'qwen-turbo'], zhipu: ['glm-4-flash', 'glm-4-plus'],
+  moonshot: ['moonshot-v1-8k', 'moonshot-v1-32k'], siliconflow: ['Qwen/Qwen2.5-72B-Instruct', 'deepseek-ai/DeepSeek-R1'],
+  gemini: ['gemini-2.0-flash', 'gemini-1.5-pro'], openrouter: ['openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet', 'deepseek/deepseek-r1'],
+  groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'], together: ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'Qwen/Qwen2.5-72B-Instruct-Turbo'],
+  mistral: ['mistral-small-latest', 'mistral-large-latest'], perplexity: ['sonar', 'sonar-pro'],
+  azure: ['YOUR-DEPLOYMENT'], anthropic: [], ollama: ['qwen2.5:7b', 'deepseek-r1:7b'], lmstudio: ['local-model'],
+};
+function fillModelOptions(provider) {
+  const models = AI_MODEL_PRESETS[provider] || [];
+  $('#ai-model-options').innerHTML = models.map(m => `<option value="${esc(m)}"></option>`).join('');
+  const chat = $('#ai-chat-model');
+  if (chat) chat.innerHTML = models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+}
+function syncAiChatControls() {
+  const activeSession = currentAiSession();
+  const model = activeSession?.model || $('#ai-model')?.value || '';
+  const chat = $('#ai-chat-model');
+  if (chat) {
+    if (!chat.querySelector(`option[value="${CSS.escape(model)}"]`)) chat.insertAdjacentHTML('afterbegin', `<option value="${esc(model)}">${esc(model)}</option>`);
+    chat.value = model;
+  }
+  const r = activeSession?.reasoning || $('#ai-reasoning')?.value || 'balanced';
+  if ($('#ai-chat-reasoning')) $('#ai-chat-reasoning').value = r;
+}
+function setReasoningFromConfig(c) {
+  const max = Number(c.max_tokens || 2400); const temp = Number(c.temperature ?? 0.2);
+  $('#ai-reasoning').value = max >= 4000 || temp <= 0.1 ? 'high' : (max <= 1600 || temp >= 0.35 ? 'low' : 'balanced');
+}
+$('#ai-reasoning').onchange = () => {
+  const values = { low: [0.35, 1400], balanced: [0.2, 2400], high: [0.08, 5000] }[$('#ai-reasoning').value];
+  $('#ai-temp').value = values[0]; $('#ai-max-tokens').value = values[1];
+  if (!currentAiSessionId && $('#ai-chat-reasoning')) $('#ai-chat-reasoning').value = $('#ai-reasoning').value;
+};
+$('#ai-chat-reasoning').onchange = () => { persistAiSessionSettings(); };
+$('#ai-chat-model').onchange = () => { persistAiSessionSettings(); };
+$('#ai-provider').onchange = () => {
+  const preset = AI_PROVIDERS[$('#ai-provider').value];
+  if (!preset) return;
+  if (preset.proxy) {
+    $('#ai-base').value = '';
+    $('#ai-model').value = '';
+    fillModelOptions($('#ai-provider').value);
+    $('#ai-status').textContent = 'Anthropic 使用 Messages API；请填写 LiteLLM、OpenRouter 等 OpenAI 兼容代理地址和模型后保存。';
+    return;
+  }
+  $('#ai-base').value = preset.base_url;
+  $('#ai-model').value = preset.model;
+  fillModelOptions($('#ai-provider').value);
+  syncAiChatControls();
+  $('#ai-status').textContent = preset.fillable
+    ? '请将 Azure 资源名和部署名替换为实际值，再填写 API Key 保存。'
+    : '已填充厂商默认配置，填写密钥后保存。';
+};
+function currentAiSession() {
+  return aiSessions.find((session) => session.id === currentAiSessionId) || null;
+}
+function setAiChatModel(model) {
+  const select = $('#ai-chat-model');
+  if (!select) return;
+  const value = model || $('#ai-model')?.value || '';
+  if (value && !Array.from(select.options).some((option) => option.value === value)) {
+    select.insertAdjacentHTML('afterbegin', `<option value="${esc(value)}">${esc(value)}</option>`);
+  }
+  select.value = value;
+}
+function renderAiSessionList() {
+  const list = $('#ai-session-list');
+  if (!list) return;
+  if (!aiSessions.length) {
+    list.innerHTML = '<div class="ai-empty">尚无对话</div>';
+    return;
+  }
+  list.innerHTML = aiSessions.map((session) => {
+    const active = session.id === currentAiSessionId ? 'active' : '';
+    const detail = [session.model || '默认模型', session.reasoning || 'balanced', session.sample_id ? `样本 #${session.sample_id}` : '无样本'].join(' · ');
+    return `<button class="ai-session-item ${active}" data-ai-session="${esc(session.id)}"><b>${esc(session.title || '新对话')}</b><small>${esc(detail)}</small></button>`;
+  }).join('');
+  list.querySelectorAll('[data-ai-session]').forEach((button) => {
+    button.onclick = () => selectAiSession(button.dataset.aiSession);
+  });
+}
+function renderAiChat() {
+  const box = $('#ai-chat-log');
+  if (!box) return;
+  if (!currentAiSessionId) {
+    box.innerHTML = '<div class="ai-empty">正在创建对话…</div>';
+    return;
+  }
+  if (!aiMessages.length) {
+    box.innerHTML = '<div class="ai-empty">这个对话会独立保存模型、思考强度和样本上下文。输入问题即可开始。</div>';
+    return;
+  }
+  box.innerHTML = aiMessages.map((message) =>
+    `<div class="ai-msg ${message.role} ${message.pending ? 'pending' : ''} ${message.error ? 'error' : ''}">${esc(message.content)}</div>`
+  ).join('');
+  box.scrollTop = box.scrollHeight;
+}
+function syncAiSessionControls(session) {
+  if (!session) return;
+  $('#ai-session-title').value = session.title || '';
+  $('#ai-chat-sample').value = session.sample_id || '';
+  setAiChatModel(session.model || $('#ai-model')?.value || '');
+  $('#ai-chat-reasoning').value = session.reasoning || 'balanced';
+}
+async function loadAiSessions() {
+  try {
+    const result = await api.aiSessions();
+    aiSessions = result.sessions || [];
+    const preferred = aiSessions.find((session) => session.id === currentAiSessionId) || aiSessions[0];
+    if (preferred) await selectAiSession(preferred.id);
+    else await createAiSession();
+  } catch (e) {
+    $('#ai-status').textContent = `会话加载失败: ${e.message || e}`;
+    renderAiSessionList(); renderAiChat();
+  }
+}
+async function createAiSession() {
+  const sampleId = Number($('#ai-chat-sample')?.value || current || 0);
+  const result = await api.aiSessionCreate({
+    model: $('#ai-chat-model')?.value || $('#ai-model')?.value || '',
+    reasoning: $('#ai-chat-reasoning')?.value || 'balanced',
+    sample_id: sampleId,
+  });
+  aiSessions.unshift(result.session);
+  await selectAiSession(result.session.id);
+}
+async function selectAiSession(sessionId) {
+  const result = await api.aiSession(sessionId);
+  currentAiSessionId = result.session.id;
+  aiMessages = result.messages || [];
+  const index = aiSessions.findIndex((session) => session.id === currentAiSessionId);
+  if (index >= 0) aiSessions[index] = { ...aiSessions[index], ...result.session };
+  else aiSessions.unshift(result.session);
+  syncAiSessionControls(result.session);
+  renderAiSessionList(); renderAiChat();
+}
+async function persistAiSessionSettings() {
+  if (!currentAiSessionId) return;
+  const payload = {
+    title: $('#ai-session-title').value.trim() || '新对话',
+    model: $('#ai-chat-model').value.trim(),
+    reasoning: $('#ai-chat-reasoning').value,
+    sample_id: Number($('#ai-chat-sample').value || 0),
+  };
+  try {
+    const result = await api.aiSessionSave(currentAiSessionId, payload);
+    const index = aiSessions.findIndex((session) => session.id === currentAiSessionId);
+    if (index >= 0) aiSessions[index] = { ...aiSessions[index], ...result.session };
+    renderAiSessionList();
+  } catch (e) {
+    $('#ai-status').textContent = `会话设置保存失败: ${e.message || e}`;
+  }
+}
+async function sendAiMessage() {
+  const input = $('#ai-prompt');
+  const question = input.value.trim();
+  if (!question) return;
+  if (!currentAiSessionId) await createAiSession();
+  const payload = {
+    content: question,
+    model: $('#ai-chat-model').value.trim(),
+    reasoning: $('#ai-chat-reasoning').value,
+    sample_id: Number($('#ai-chat-sample').value || current || 0),
+  };
+  aiMessages.push({ role: 'user', content: question });
+  aiMessages.push({ role: 'assistant', content: '思考中…', pending: true });
+  input.value = ''; renderAiChat();
+  try {
+    const result = await api.aiSessionSend(currentAiSessionId, payload);
+    aiMessages[aiMessages.length - 1] = { role: 'assistant', content: result.reply || '(模型没有返回文本)' };
+    const index = aiSessions.findIndex((session) => session.id === currentAiSessionId);
+    if (index >= 0) aiSessions[index] = { ...aiSessions[index], ...result.session };
+    syncAiSessionControls(result.session);
+    renderAiSessionList();
+  } catch (e) {
+    aiMessages[aiMessages.length - 1] = { role: 'assistant', content: String(e.message || e), error: true };
+  }
+  renderAiChat();
 }
 $('#btn-ai-save').onclick = async () => {
   const d = {
@@ -401,6 +677,7 @@ $('#btn-ai-save').onclick = async () => {
     api_key: $('#ai-key').value.trim(),
     model: $('#ai-model').value.trim(),
     temperature: parseFloat($('#ai-temp').value || '0.2'),
+    max_tokens: parseInt($('#ai-max-tokens').value || '2400', 10),
   };
   const r = await api.aiSave(d);
   $('#ai-status').textContent = r.ok ? '✓ 已保存' : '保存失败';
@@ -418,22 +695,62 @@ $('#btn-ai-test').onclick = async () => {
 };
 $('#btn-ai-summarize').onclick = async () => {
   if (!current) { alert('请先选中样本'); return; }
-  $('#ai-out').textContent = 'AI 分析中…';
-  try {
-    const r = await api.aiSummarize(current, $('#ai-prompt').value || '');
-    $('#ai-out').textContent = r.reply;
-  } catch (e) { $('#ai-out').textContent = '错误: ' + e; }
+  $('#ai-chat-sample').value = current;
+  await persistAiSessionSettings();
+  $('#ai-prompt').value = '请基于当前样本给出结构化分析、关键证据和下一步工作流建议。';
+  await sendAiMessage();
 };
 $('#btn-ai-send').onclick = async () => {
-  const q = $('#ai-prompt').value.trim();
-  if (!q) return;
-  const ctx = current ? `(当前样本 #${current})` : '';
-  $('#ai-out').textContent = '思考中…';
-  try {
-    const r = await api.aiChat([{ role: 'user', content: `${ctx} ${q}` }]);
-    $('#ai-out').textContent = r.reply;
-  } catch (e) { $('#ai-out').textContent = '错误: ' + e; }
+  await sendAiMessage();
 };
+$('#ai-prompt').onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAiMessage(); } };
+$('#btn-ai-session-new').onclick = async () => { await createAiSession(); };
+$('#btn-ai-clear').onclick = async () => { await createAiSession(); };
+$('#ai-session-title').onchange = () => { persistAiSessionSettings(); };
+$('#ai-chat-sample').onchange = () => { persistAiSessionSettings(); };
+$('#btn-ai-compress').onclick = async () => {
+  if (!currentAiSessionId) return;
+  try {
+    const result = await api.aiSessionCompress(currentAiSessionId, { force: true });
+    $('#ai-status').textContent = result.compressed ? '已压缩早期上下文，完整消息仍会保留。' : '当前上下文无需压缩。';
+  } catch (e) { $('#ai-status').textContent = `上下文压缩失败: ${e.message || e}`; }
+};
+$('#btn-ai-session-delete').onclick = async () => {
+  if (!currentAiSessionId || !confirm('删除当前对话及其消息记录？')) return;
+  try {
+    await api.aiSessionDelete(currentAiSessionId);
+    aiSessions = aiSessions.filter((session) => session.id !== currentAiSessionId);
+    currentAiSessionId = null; aiMessages = [];
+    await loadAiSessions();
+  } catch (e) { $('#ai-status').textContent = `删除对话失败: ${e.message || e}`; }
+};
+$('#btn-ai-workflow').onclick = async () => {
+  const input = $('#ai-prompt');
+  const latestUser = [...aiMessages].reverse().find((message) => message.role === 'user');
+  const prompt = input.value.trim() || latestUser?.content || '生成一个可编辑的 PE 分析工作流。';
+  const sampleId = Number($('#ai-chat-sample').value || current || 0);
+  $('#ai-workflow-status').textContent = '正在生成并验证草稿…';
+  try {
+    const draft = await api.aiWorkflowGenerate(prompt, sampleId);
+    const saved = await api.aiWorkflowSave({ workflow: draft.workflow, generator: draft.generator });
+    const warnings = (draft.warnings || []).concat(saved.warnings || []);
+    $('#ai-workflow-status').textContent = `已保存「${saved.workflow.name}」${warnings.length ? `（${warnings.length} 条提示）` : ''}`;
+    const frame = $('#workflow-frame');
+    const sample = sampleId ? `&sample_id=${encodeURIComponent(sampleId)}` : '';
+    frame.src = `/wf/?embedded=1&workflow=${encodeURIComponent(saved.workflow.name)}${sample}`;
+    document.querySelector('.nav-btn[data-view="workflows"]').click();
+  } catch (e) {
+    $('#ai-workflow-status').textContent = `草稿生成失败: ${e.message || e}`;
+  }
+};
+document.querySelectorAll('[data-ai-tab]').forEach((tab) => {
+  tab.onclick = () => {
+    const settings = tab.dataset.aiTab === 'settings';
+    document.querySelectorAll('[data-ai-tab]').forEach((x) => x.classList.toggle('active', x === tab));
+    $('#ai-settings-panel').classList.toggle('hidden', !settings);
+    $('#ai-chat-panel').classList.toggle('hidden', settings);
+  };
+});
 
 /* ---------------- 通用引擎分析(UE / Unity) ---------------- */
 const engines = {
@@ -509,12 +826,55 @@ function updateEngineUI(engine, a) {
   engSet(engine, 'status', `<span class="badge ${stCls}">${esc(a.status)}</span>` + (a.stage ? ` <small>${esc(a.stage)}</small>` : ''));
   if (a.status === 'done' || a.status === 'error') {
     const body = (engine === 'ue' ? renderUEResult(result) : renderUnityResult(result)) +
+      `<div id="${engine}-artifact-summary" class="engine-artifact-summary"><span class="hint">正在读取本次运行的产物清单…</span></div>` +
       (a.error ? `<p><span class="badge bad">${esc(a.error)}</span></p>` : '');
     engSet(engine, 'result-body', body);
+    if (engine === 'unity') {
+      engEl(engine, 'result-body').querySelectorAll('[data-unity-artifact-center]').forEach((button) => {
+        button.onclick = () => showEngineArtifactsInCenter('unity', a.id);
+      });
+    }
     loadDumpPreviews(engine);
+    loadEngineArtifactSummary(engine, a.id);
   } else {
     engSet(engine, 'result-body', `<p class="hint">分析进行中… 当前阶段:${esc(a.stage || '初始化')}(每 2.5s 自动刷新)</p>`);
   }
+}
+
+async function loadEngineArtifactSummary(engine, analysisId) {
+  const slot = engEl(engine, 'artifact-summary');
+  if (!slot || !analysisId) return;
+  try {
+    const manifest = await api.engineArtifacts(engine, analysisId);
+    const count = (manifest.artifacts || []).length;
+    const runPath = manifest.absolute_run_directory || manifest.run_directory || '';
+    slot.innerHTML = `
+      <span class="badge ${count ? 'ok' : 'info'}">${count ? `${count} 个已登记产物` : '本次尚无登记产物'}</span>
+      <span class="hint" title="${esc(runPath)}">${esc(runPath || '运行目录已创建')}</span>
+      <button data-engine-open-run title="打开本次专项分析的输出目录">打开本次输出目录</button>
+      <button data-engine-show-artifacts>在产物中心查看</button>`;
+    slot.querySelector('[data-engine-open-run]').onclick = () => openEngineRunFolder(engine, analysisId, slot);
+    slot.querySelector('[data-engine-show-artifacts]').onclick = () => showEngineArtifactsInCenter(engine, analysisId);
+  } catch (error) {
+    slot.innerHTML = `<span class="badge bad">产物清单不可用</span><span class="hint">${esc(error.message || error)}</span>`;
+  }
+}
+
+async function openEngineRunFolder(engine, analysisId, feedback) {
+  try {
+    const result = await api.openEngineRunFolder(engine, analysisId);
+    if (feedback) feedback.querySelector('.hint')?.replaceChildren(document.createTextNode(`已打开: ${result.opened || ''}`));
+  } catch (error) {
+    if (feedback) feedback.insertAdjacentHTML('beforeend', `<span class="badge bad">${esc(error.message || error)}</span>`);
+  }
+}
+
+function showEngineArtifactsInCenter(engine, analysisId) {
+  const button = document.querySelector('.nav-btn[data-view="settings"]');
+  if (button) button.click();
+  const run = artifactRuns.find((item) => item.run_type === 'engine' && item.engine === engine && String(item.analysis_id) === String(analysisId));
+  if (run) selectArtifactRun(run);
+  else loadArtifactRuns({ preferred: { run_type: 'engine', engine, analysis_id: analysisId } });
 }
 
 function pollEngine(engine, id) {
@@ -530,6 +890,7 @@ function pollEngine(engine, id) {
         clearInterval(cfg.timer);
         cfg.timer = null;
         loadEngineHistory(engine);
+        loadArtifactRuns({ preferred: { run_type: 'engine', engine, analysis_id: id }, force: true, silent: true });
       }
     } catch (e) { /* noop */ }
   };
@@ -545,6 +906,7 @@ async function startEngineAnalysis(engine, body) {
       engSet(engine, 'status', `已启动 #${r.id}`);
       pollEngine(engine, r.id);
       loadEngineHistory(engine);
+      loadArtifactRuns({ preferred: { run_type: 'engine', engine, analysis_id: r.id }, silent: true });
     } else {
       engSet(engine, 'status', `<span class="badge bad">启动失败</span> ${esc((r && (r.detail || r.error)) || JSON.stringify(r))}`);
     }
@@ -746,7 +1108,137 @@ $('#btn-unity-analyze').onclick = async () => {
   startEngineAnalysis('unity', body);
 };
 
+function unityScalar(value, fallback = '-') {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return value.slice(0, 4).map((item) => unityScalar(item, '')).filter(Boolean).join(', ') || fallback;
+  return String(value.value || value.name || value.path || value.file || fallback);
+}
+
+function unityStringLine(entry) {
+  if (typeof entry === 'string') return entry;
+  if (!entry || typeof entry !== 'object') return String(entry || '');
+  const location = entry.offset != null ? `0x${Number(entry.offset).toString(16)}` : (entry.file || entry.path || '');
+  const value = entry.value ?? entry.string ?? entry.text ?? entry.name ?? '';
+  return `${location ? `${location} ` : ''}${typeof value === 'object' ? unityScalar(value, '') : String(value)}`.slice(0, 600);
+}
+
 function renderUnityResult(r) {
+  const version = r.version || {};
+  const build = r.buildtype || {};
+  const scan = r.scan?.detect || {};
+  const assembly = r.assembly || {};
+  const resources = Array.isArray(r.resource?.resources) ? r.resource.resources : [];
+  const strings = r.strings || {};
+  const decrypt = r.decrypt || {};
+  const sdk = r.sdk || {};
+  const metadataCandidates = decrypt.metadata_candidates || scan.metadata_candidates || {};
+  const candidateRows = Array.isArray(metadataCandidates.candidates) ? metadataCandidates.candidates.slice(0, 12) : [];
+  const interesting = Array.isArray(strings.interesting) && strings.interesting.length
+    ? strings.interesting
+    : (Array.isArray(strings.strings) ? strings.strings : []);
+  const allStringCount = Number(strings.count || strings.string_count || (Array.isArray(strings.strings) ? strings.strings.length : 0));
+  const gameAssembly = assembly.game_assembly || assembly.gameassembly || null;
+  const isMeaningfulString = (entry) => {
+    const value = typeof entry === 'string' ? entry : (entry?.value ?? entry?.string ?? entry?.text ?? '');
+    return /[A-Za-z]{3,}|https?:\/\/|::|[\\/_.-]/.test(String(value));
+  };
+  const stringPreview = interesting.filter(isMeaningfulString);
+  const safeStringPreview = stringPreview.length ? stringPreview : interesting.slice(0, 120);
+  const gameAssemblyPath = assembly.gameassembly_path || gameAssembly?.path || '';
+  const metadataPath = assembly.metadata_path || decrypt.usable_metadata_path || decrypt.metadata || '';
+
+  let html = '<div class="kv">';
+  html += kvRow('Unity 版本', esc(version.version || version.detected_version || scan.unity_version || '未识别'));
+  html += kvRow('构建类型', esc(build.build_type || assembly.mode || scan.build_type || '-'));
+  if (build.confidence) html += kvRow('识别置信度', esc(build.confidence));
+  if (build.note) html += kvRow('构建证据', esc(build.note));
+  html += '</div>';
+
+  html += '<h3>程序集 / IL2CPP</h3><div class="kv">';
+  html += kvRow('模式', esc(assembly.mode || build.build_type || '-'));
+  html += kvRow('GameAssembly.dll', esc(gameAssemblyPath || '未找到'));
+  if (gameAssembly?.machine || gameAssembly?.is_64bit != null) {
+    html += kvRow('架构', esc(gameAssembly.machine || (gameAssembly.is_64bit ? 'x64' : 'x86')));
+  }
+  if (gameAssembly?.size != null) html += kvRow('大小', esc(Number(gameAssembly.size).toLocaleString() + ' bytes'));
+  if (gameAssembly?.il2cpp_export_count != null) html += kvRow('IL2CPP 导出', esc(gameAssembly.il2cpp_export_count));
+  html += '</div>';
+  const sections = Array.isArray(gameAssembly?.sections) ? gameAssembly.sections.slice(0, 16) : [];
+  if (sections.length) {
+    html += '<table><thead><tr><th>节区</th><th>VA</th><th>大小</th><th>熵</th><th>标志</th></tr></thead><tbody>' +
+      sections.map((section) => `<tr><td class="mono">${esc(section.name || '')}</td><td class="mono">${esc(section.virtual_address || section.va || '')}</td><td>${esc(section.virtual_size || section.size || '')}</td><td>${esc(section.entropy ?? '')}</td><td>${esc(Array.isArray(section.flags) ? section.flags.join(', ') : (section.characteristics || ''))}</td></tr>`).join('') +
+      '</tbody></table>';
+  }
+
+  html += '<h3>Metadata 状态</h3><div class="kv">';
+  html += kvRow('状态', esc(decrypt.status || metadataCandidates.status || 'not_checked'));
+  html += kvRow('解密状态', esc(decrypt.decryption_status || 'not_started'));
+  html += kvRow('标准 Metadata', esc(metadataPath || '未找到'));
+  if (decrypt.verified != null) html += kvRow('已验证明文', decrypt.verified ? '<span class="badge ok">是</span>' : '<span class="badge warn">否</span>');
+  if (decrypt.decryption_required != null) html += kvRow('需要解密', decrypt.decryption_required ? '<span class="badge warn">是</span>' : '<span class="badge ok">否</span>');
+  if (decrypt.recipe) html += kvRow('恢复配方', esc(decrypt.recipe));
+  if (decrypt.recovery?.descriptor?.part_count != null) html += kvRow('加密分片', esc(decrypt.recovery.descriptor.part_count));
+  if (decrypt.recovery?.validation?.region_count != null) html += kvRow('Metadata 表区域', esc(decrypt.recovery.validation.region_count));
+  if (decrypt.recovery?.validation?.overlap_count != null) html += kvRow('区域重叠', esc(decrypt.recovery.validation.overlap_count));
+  if (decrypt.note) html += kvRow('说明', esc(decrypt.note));
+  if (metadataCandidates.candidate_count != null) html += kvRow('候选文件数', esc(metadataCandidates.candidate_count));
+  if (metadataCandidates.candidate_summary) html += kvRow('候选摘要', esc(metadataCandidates.candidate_summary));
+  html += '</div>';
+  if (candidateRows.length) {
+    html += '<table><thead><tr><th>候选文件</th><th>大小</th><th>熵</th><th>Magic</th><th>评级</th></tr></thead><tbody>' +
+      candidateRows.map((candidate) => `<tr><td class="mono" title="${esc(candidate.path || '')}">${esc(candidate.relative_path || candidate.path || candidate.name || '')}</td><td>${esc(candidate.size ?? '')}</td><td>${esc(candidate.entropy ?? '')}</td><td>${candidate.magic_found ? '<span class="badge ok">命中</span>' : '-'}</td><td>${esc(candidate.confidence || candidate.classification || candidate.reason || '')}</td></tr>`).join('') +
+      '</tbody></table>';
+  }
+
+  html += `<h3>资源 (${resources.length})</h3>`;
+  if (resources.length) {
+    html += '<table><thead><tr><th>文件</th><th>格式</th><th>大小</th></tr></thead><tbody>' +
+      resources.slice(0, 60).map((resource) => `<tr><td class="mono" title="${esc(resource.file || resource.path || '')}">${esc(resource.file || resource.path || resource.name || '')}</td><td>${esc(resource.header || resource.type || '')}</td><td>${esc(resource.size ?? '')}</td></tr>`).join('') +
+      '</tbody></table>';
+    if (resources.length > 60) html += `<p class="hint">仅显示前 60 项，共 ${resources.length} 项。</p>`;
+  } else html += '<p class="hint">没有可展示的资源摘要。</p>';
+
+  html += `<h3>关键字符串 (${allStringCount.toLocaleString()})</h3>`;
+  if (safeStringPreview.length) {
+    html += `<p class="hint">${Array.isArray(strings.interesting) && strings.interesting.length ? '优先展示命中规则的可读字符串；' : ''}仅显示前 ${Math.min(120, safeStringPreview.length)} 项。</p>`;
+    html += `<pre class="mono" style="max-height:260px">${safeStringPreview.slice(0, 120).map((entry) => esc(unityStringLine(entry))).join('\n')}</pre>`;
+  } else html += '<p class="hint">没有可展示的字符串摘要。</p>';
+
+  html += '<h3>SDK 交付</h3><div class="kv">';
+  html += kvRow('状态', esc(sdk.status || (sdk.ok ? 'ready' : 'not_started')));
+  if (sdk.delivery_complete != null) html += kvRow('交付完整', sdk.delivery_complete ? '<span class="badge ok">是</span>' : '<span class="badge warn">否</span>');
+  if (sdk.metadata_status?.status) html += kvRow('Metadata 前置条件', esc(sdk.metadata_status.status));
+  if (sdk.note) html += kvRow('原因', esc(sdk.note));
+  const registration = sdk.registration || sdk.official_tool?.registration || {};
+  if (registration.found) {
+    html += kvRow('CodeRegistration', `<span class="mono">0x${Number(registration.code_registration).toString(16)}</span>`);
+    html += kvRow('MetadataRegistration', `<span class="mono">0x${Number(registration.metadata_registration).toString(16)}</span>`);
+    html += kvRow('注册地址证据', esc(`${registration.section || ''} · ${registration.candidate_count || 1} 个结构候选`));
+  }
+  const stats = sdk.stats || {};
+  for (const [label, key] of [['类型', 'types'], ['方法', 'methods'], ['字段', 'fields'], ['枚举', 'enums']]) {
+    if (stats[key] != null) html += kvRow(label, esc(stats[key]));
+  }
+  html += '</div>';
+  if (sdk.delivery_complete) {
+    html += `<table><thead><tr><th>SDK 产物</th><th>状态</th></tr></thead><tbody>
+      <tr><td>Dump.cs</td><td>${sdk.dump_cs ? '<span class="badge ok">已生成</span>' : '<span class="badge bad">缺失</span>'}</td></tr>
+      <tr><td>script.json</td><td>${sdk.script_json ? '<span class="badge ok">已生成</span>' : '<span class="badge bad">缺失</span>'}</td></tr>
+      <tr><td>il2cpp.h</td><td>${sdk.il2cpp_h ? '<span class="badge ok">已生成</span>' : '<span class="badge bad">缺失</span>'}</td></tr>
+      <tr><td>DummyDll</td><td>${(sdk.dummy_dlls || []).length ? `<span class="badge ok">${(sdk.dummy_dlls || []).length} 个 DLL</span>` : '<span class="badge bad">缺失</span>'}</td></tr>
+    </tbody></table>`;
+  }
+  if (sdk.status === 'blocked_by_metadata') html += '<p class="hint">SDK 导出已被有意阻止，直到 Metadata 被验证为明文或经过可复现的解密验证。</p>';
+
+  html += `<h3>交付文件</h3><p><button data-unity-artifact-center>在产物中心查看本次报告与交付文件</button></p>`;
+  return html;
+}
+
+/* Legacy renderer retained for compatibility with saved browser state. The
+ * active Unity engine path uses renderUnityResult above, which consumes the
+ * staged result contract and keeps previews bounded. */
+function renderLegacyUnityResult(r) {
   let html = '<div class="kv">';
   const ver = r.unity_version;
   const verText = typeof ver === 'string' ? ver : pick(ver, ['version', 'full', 'full_version', 'label'], '未识别');
@@ -943,23 +1435,416 @@ curl -X POST http://127.0.0.1:8765/mcp -H 'Content-Type: application/json' -d '{
 `;
 };
 
-/* ---------------- 全局设置 ---------------- */
+/* ---------------- Global settings, environment, and artifact center ---------------- */
+function environmentJobText(status) {
+  const job = status.job || {};
+  if (job.status === 'running') return '正在自动配置';
+  if (job.status === 'failed') return '配置失败，可重试';
+  if (status.ready) return '环境已就绪';
+  return `缺少 ${((status.missing || []).length || 0)} 项依赖`;
+}
+
+function renderEnvironment(status) {
+  environmentSnapshot = status || {};
+  const job = status.job || {};
+  const summary = $('#environment-summary');
+  const statusText = environmentJobText(status);
+  const summaryClass = status.ready ? 'ok' : (job.status === 'running' ? 'warn' : 'bad');
+  summary.className = `badge ${summaryClass}`;
+  summary.textContent = statusText;
+
+  const missing = status.missing || [];
+  const missingEl = $('#environment-missing');
+  if (missing.length) {
+    missingEl.classList.remove('hidden');
+    missingEl.innerHTML = `<b>需要准备:</b> ${missing.map(esc).join('、')}`;
+  } else {
+    missingEl.classList.add('hidden');
+    missingEl.textContent = '';
+  }
+
+  const checks = status.checks || [];
+  $('#environment-checks').innerHTML = checks.map((check) => {
+    const state = check.ready ? 'ready' : (check.required ? 'missing' : 'optional');
+    const label = check.ready ? '已就绪' : (check.required ? '缺失' : '可选');
+    const meta = [check.version ? `版本 ${check.version}` : '', check.path || '未检测到路径'].filter(Boolean).join(' · ');
+    return `<article class="environment-check ${state}">
+      <div class="environment-check-head"><span class="environment-check-name">${esc(check.name || check.key)}</span><span class="badge ${check.ready ? 'ok' : (check.required ? 'bad' : 'warn')}">${label}</span></div>
+      <div class="environment-check-meta" title="${esc(check.path || '')}">${esc(meta)}</div>
+      <div class="environment-check-remedy">${esc(check.remedy || '')}</div>
+    </article>`;
+  }).join('') || '<p class="hint">未返回环境检查项目。</p>';
+
+  const logs = job.logs || [];
+  const logWrap = $('#environment-log-wrap');
+  if (logs.length) {
+    logWrap.classList.remove('hidden');
+    logWrap.open = job.status === 'running' || job.status === 'failed';
+    $('#environment-log').textContent = logs.map((entry) => `${String(entry.at || '').replace('T', ' ').slice(0, 19)}  ${entry.message || ''}`).join('\n');
+  } else {
+    logWrap.classList.add('hidden');
+    $('#environment-log').textContent = '';
+  }
+
+  const details = [
+    status.ready ? '所有必需能力均可用于执行。' : '工作流执行会在缺失组件时暂停，完成准备后可直接重试。',
+    job.status && job.status !== 'idle' ? `当前任务: ${job.status}${job.return_code != null ? ` (退出码 ${job.return_code})` : ''}` : '',
+  ].filter(Boolean);
+  $('#environment-status').textContent = details.join(' ');
+  $('#btn-environment-prepare').disabled = job.status === 'running';
+  $('#btn-environment-prepare').textContent = job.status === 'running' ? '正在配置' : (status.ready ? '重新检查' : '检查并配置');
+  scheduleEnvironmentRefresh(status);
+}
+
+function scheduleEnvironmentRefresh(status) {
+  if (environmentTimer) {
+    clearTimeout(environmentTimer);
+    environmentTimer = null;
+  }
+  if ((status.job || {}).status === 'running') {
+    environmentTimer = setTimeout(() => loadEnvironment(), 1600);
+  }
+}
+
+async function loadEnvironment() {
+  try {
+    const status = await api.environment();
+    renderEnvironment(status);
+    return status;
+  } catch (error) {
+    $('#environment-summary').className = 'badge bad';
+    $('#environment-summary').textContent = '环境状态不可用';
+    $('#environment-status').textContent = String(error.message || error);
+    return null;
+  }
+}
+
+async function prepareEnvironment() {
+  const button = $('#btn-environment-prepare');
+  button.disabled = true;
+  $('#environment-status').textContent = '正在请求本机环境准备…';
+  try {
+    const job = (environmentSnapshot || {}).job || {};
+    const result = await api.prepareEnvironment(job.status === 'failed');
+    renderEnvironment(result);
+    $('#environment-status').textContent = result.reason === 'already_ready'
+      ? '当前环境已完整配置。'
+      : (result.started ? '已启动自动配置，状态会持续刷新。' : '已有环境配置任务正在运行。');
+  } catch (error) {
+    $('#environment-status').textContent = `环境准备请求失败: ${error.message || error}`;
+    button.disabled = false;
+  }
+}
+
+function artifactRunKey(run) {
+  if (!run) return '';
+  return run.run_type === 'engine'
+    ? `engine:${run.engine}:${run.analysis_id}`
+    : `graph:${run.task_id}`;
+}
+
+function artifactRunTitle(run) {
+  if (run.run_type === 'engine') return `${String(run.engine || '').toUpperCase()} · ${run.name || '专项分析'}`;
+  return `图工作流 · ${run.name || '未命名任务'}`;
+}
+
+function artifactRunSubTitle(run) {
+  const pieces = [];
+  if (run.run_type === 'engine') pieces.push(`分析 #${run.analysis_id}`);
+  else pieces.push(`任务 #${run.task_id}`);
+  if (run.sample_id) pieces.push(`样本 #${run.sample_id}`);
+  return pieces.join(' · ');
+}
+
+function artifactStatusClass(status) {
+  return { completed: 'ok', done: 'ok', running: 'warn', pending: 'info', failed: 'bad', error: 'bad', stopped: 'warn' }[status] || 'info';
+}
+
+function formatRunTime(value) {
+  return String(value || '').replace('T', ' ').replace('Z', '').slice(0, 19) || '-';
+}
+
+function setArtifactStatus(message, isError = false) {
+  const el = $('#artifact-status');
+  if (!el) return;
+  el.textContent = message || '';
+  el.style.color = isError ? 'var(--red)' : '';
+}
+
+function renderArtifactRuns() {
+  const table = $('#artifact-run-list');
+  if (!table) return;
+  const needle = String($('#artifact-search')?.value || '').trim().toLowerCase();
+  const visible = artifactRuns.filter((run) => {
+    if (!needle) return true;
+    return [artifactRunTitle(run), artifactRunSubTitle(run), run.status, run.engine, run.sample_id].join(' ').toLowerCase().includes(needle);
+  });
+  if (!visible.length) {
+    table.innerHTML = '<tr><td colspan="4" class="hint">没有符合条件的运行记录。</td></tr>';
+    return;
+  }
+  const selectedKey = artifactRunKey(selectedArtifactRun);
+  table.innerHTML = visible.map((run) => {
+    const key = artifactRunKey(run);
+    return `<tr class="artifact-run-row ${key === selectedKey ? 'selected' : ''}" data-artifact-run="${esc(key)}">
+      <td><span class="artifact-run-title" title="${esc(artifactRunTitle(run))}">${esc(artifactRunTitle(run))}</span><span class="artifact-run-sub">${esc(artifactRunSubTitle(run))}</span></td>
+      <td><span class="badge ${artifactStatusClass(run.status)}">${esc(run.status || 'unknown')}</span></td>
+      <td>${run.manifest_ready ? esc(run.artifact_count || 0) : '<span class="hint">待读取</span>'}</td>
+      <td class="mono">${esc(formatRunTime(run.created_at))}</td>
+    </tr>`;
+  }).join('');
+  table.querySelectorAll('[data-artifact-run]').forEach((row) => {
+    row.onclick = () => {
+      const run = artifactRuns.find((item) => artifactRunKey(item) === row.dataset.artifactRun);
+      if (run) selectArtifactRun(run);
+    };
+  });
+}
+
+function artifactDownloadUrl(run, artifactId) {
+  const encoded = encodeURIComponent(artifactId);
+  if (run.run_type === 'engine') {
+    return `/api/artifacts/engine/${encodeURIComponent(run.engine)}/${encodeURIComponent(run.analysis_id)}/download/${encoded}`;
+  }
+  return `/api/artifacts/${encodeURIComponent(run.task_id)}/download/${encoded}`;
+}
+
+function artifactManifestTitle(manifest, run) {
+  const meta = manifest.task || manifest.run || {};
+  const kind = run.run_type === 'engine' ? `${String(run.engine || '').toUpperCase()} 专项分析` : '图工作流';
+  return `${kind} · ${meta.name || run.name || '未命名运行'}`;
+}
+
+function renderArtifactManifest(manifest, run) {
+  const detail = $('#artifact-detail');
+  if (!detail) return;
+  const items = manifest.artifacts || [];
+  const runPath = manifest.absolute_run_directory || manifest.run_directory || '';
+  const meta = manifest.task || manifest.run || {};
+  const source = run.run_type === 'engine' ? `#${run.analysis_id}` : `#${run.task_id}`;
+  detail.innerHTML = `
+    <div class="artifact-detail-head">
+      <div><h4>${esc(artifactManifestTitle(manifest, run))}</h4><p title="${esc(runPath)}">运行 ${esc(source)} · ${esc(runPath || '未提供运行目录')}</p></div>
+      <div class="artifact-action-row"><button data-artifact-open-run title="打开本次运行的输出目录">打开本次目录</button></div>
+    </div>
+    <div class="artifact-action-row"><span class="badge ${artifactStatusClass(meta.status || run.status)}">${esc(meta.status || run.status || 'unknown')}</span><span class="hint">${items.length} 个已登记产物</span></div>
+    <div class="artifact-file-list">${items.length ? items.map((artifact) => {
+      const absolutePath = artifact.absolute_path || artifact.relative_path || '';
+      const nodes = (artifact.source_nodes || []).filter(Boolean);
+      return `<article class="artifact-file">
+        <div><div class="artifact-file-name" title="${esc(absolutePath)}">${esc(artifact.name || artifact.relative_path || '未命名文件')}</div>
+          <div class="artifact-file-meta">${esc(artifact.kind || 'file')} · ${Number(artifact.size || 0).toLocaleString()} bytes</div>
+          <div class="artifact-file-meta">${esc(absolutePath)}</div>
+          ${nodes.length ? `<div class="artifact-node-list">来源节点: ${esc(nodes.join(', '))}</div>` : ''}
+        </div>
+        <div class="artifact-file-actions">
+          <button data-artifact-open="${esc(artifact.id)}">打开</button>
+          <button data-artifact-folder="${esc(artifact.id)}">所在目录</button>
+          <button data-artifact-copy="${esc(absolutePath)}">复制路径</button>
+          ${artifact.is_directory ? '' : `<a href="${artifactDownloadUrl(run, artifact.id)}" download>下载</a>`}
+        </div>
+      </article>`;
+    }).join('') : '<p class="hint">此运行尚未产生受控交付文件。完成报告、反编译、脱壳或 SDK 导出后刷新即可查看。</p>'}</div>`;
+
+  detail.querySelector('[data-artifact-open-run]').onclick = () => openArtifactRunFolder(run);
+  detail.querySelectorAll('[data-artifact-open]').forEach((button) => {
+    button.onclick = () => openArtifactFile(run, button.dataset.artifactOpen, false);
+  });
+  detail.querySelectorAll('[data-artifact-folder]').forEach((button) => {
+    button.onclick = () => openArtifactFile(run, button.dataset.artifactFolder, true);
+  });
+  detail.querySelectorAll('[data-artifact-copy]').forEach((button) => {
+    button.onclick = () => copyArtifactPath(button.dataset.artifactCopy);
+  });
+}
+
+async function selectArtifactRun(run) {
+  selectedArtifactRun = run;
+  renderArtifactRuns();
+  const detail = $('#artifact-detail');
+  detail.innerHTML = '<p class="hint">正在读取该运行的产物清单…</p>';
+  try {
+    const manifest = run.run_type === 'engine'
+      ? await api.engineArtifacts(run.engine, run.analysis_id)
+      : await api.graphArtifacts(run.task_id);
+    renderArtifactManifest(manifest, run);
+    setArtifactStatus(`已载入 ${artifactManifestTitle(manifest, run)}`);
+  } catch (error) {
+    detail.innerHTML = `<p><span class="badge bad">产物清单不可用</span> ${esc(error.message || error)}</p>`;
+    setArtifactStatus(`读取产物失败: ${error.message || error}`, true);
+  }
+}
+
+async function loadArtifactRunsInternal(options = {}) {
+  const priorKey = artifactRunKey(selectedArtifactRun);
+  const priorSnapshot = selectedArtifactRun
+    ? `${selectedArtifactRun.status}:${selectedArtifactRun.manifest_ready}:${selectedArtifactRun.artifact_count || 0}`
+    : '';
+  setArtifactStatus('正在刷新运行记录…');
+  try {
+    const result = await api.artifactRuns();
+    artifactRuns = result.runs || [];
+    const preferred = options.preferred;
+    const preferredKey = preferred ? artifactRunKey(preferred) : '';
+    selectedArtifactRun = artifactRuns.find((run) => artifactRunKey(run) === preferredKey)
+      || artifactRuns.find((run) => artifactRunKey(run) === priorKey)
+      || artifactRuns[0]
+      || null;
+    const selectionChanged = artifactRunKey(selectedArtifactRun) !== priorKey;
+    const currentSnapshot = selectedArtifactRun
+      ? `${selectedArtifactRun.status}:${selectedArtifactRun.manifest_ready}:${selectedArtifactRun.artifact_count || 0}`
+      : '';
+    const runChanged = currentSnapshot !== priorSnapshot;
+    renderArtifactRuns();
+    if (selectedArtifactRun && (!options.silent || selectionChanged || runChanged || options.force)) {
+      await selectArtifactRun(selectedArtifactRun);
+    }
+    else if (!selectedArtifactRun) {
+      $('#artifact-detail').innerHTML = '<p class="hint">尚无工作流或专项分析运行记录。</p>';
+      setArtifactStatus('尚无可读取的产物。');
+    }
+  } catch (error) {
+    $('#artifact-run-list').innerHTML = '<tr><td colspan="4" class="hint">运行记录不可用。</td></tr>';
+    $('#artifact-detail').innerHTML = `<p><span class="badge bad">无法读取产物中心</span> ${esc(error.message || error)}</p>`;
+    setArtifactStatus(`读取失败: ${error.message || error}`, true);
+  }
+}
+
+async function loadArtifactRuns(options = {}) {
+  if (artifactRefreshInFlight) {
+    artifactRefreshQueuedOptions = {
+      ...(artifactRefreshQueuedOptions || {}),
+      ...options,
+      preferred: options.preferred || artifactRefreshQueuedOptions?.preferred,
+    };
+    return artifactRefreshInFlight;
+  }
+  artifactRefreshInFlight = loadArtifactRunsInternal(options).finally(() => {
+    artifactRefreshInFlight = null;
+    const queued = artifactRefreshQueuedOptions;
+    artifactRefreshQueuedOptions = null;
+    if (queued) loadArtifactRuns(queued);
+  });
+  return artifactRefreshInFlight;
+}
+
+// Keep the host artifact center in sync while a workflow iframe or an engine
+// worker is producing output. The detail selection is preserved by
+// loadArtifactRuns(), which resolves the previous run key on every refresh.
+function stopArtifactCenterRefresh() {
+  if (artifactRefreshTimer) {
+    clearTimeout(artifactRefreshTimer);
+    artifactRefreshTimer = null;
+  }
+}
+
+function scheduleArtifactCenterRefresh() {
+  stopArtifactCenterRefresh();
+  if (document.hidden) return;
+  artifactRefreshTimer = setTimeout(async () => {
+    artifactRefreshTimer = null;
+    if (!document.hidden) await loadArtifactRuns({ silent: true });
+    scheduleArtifactCenterRefresh();
+  }, 3500);
+}
+
+// The graph editor is same-origin and runs in an iframe. It emits lifecycle
+// events so a newly-created task is visible immediately, without a manual
+// page refresh or navigation to Settings.
+window.addEventListener('message', (event) => {
+  if (event.origin && event.origin !== window.location.origin) return;
+  const message = event.data;
+  if (!message || message.source !== 'revlab-workflow') return;
+  const accepted = ['workflow-task-created', 'workflow-task-status', 'workflow-task-completed', 'workflow-artifacts-updated'];
+  if (!accepted.includes(message.type)) return;
+  const taskId = Number(message.taskId || message.task_id || 0);
+  loadArtifactRuns({
+    preferred: taskId ? { run_type: 'graph', task_id: taskId } : undefined,
+    silent: true,
+  });
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopArtifactCenterRefresh();
+  else {
+    loadArtifactRuns({ silent: true });
+    scheduleArtifactCenterRefresh();
+  }
+});
+
+async function openArtifactRunFolder(run) {
+  try {
+    const result = run.run_type === 'engine'
+      ? await api.openEngineRunFolder(run.engine, run.analysis_id)
+      : await api.openGraphRunFolder(run.task_id);
+    setArtifactStatus(`已打开: ${result.opened || ''}`);
+  } catch (error) {
+    setArtifactStatus(`打开运行目录失败: ${error.message || error}`, true);
+  }
+}
+
+async function openArtifactFile(run, artifactId, folder) {
+  try {
+    const result = run.run_type === 'engine'
+      ? await api.openEngineArtifact(run.engine, run.analysis_id, artifactId, folder)
+      : await api.openGraphArtifact(run.task_id, artifactId, folder);
+    setArtifactStatus(`${folder ? '已打开所在目录' : '已打开文件'}: ${result.opened || ''}`);
+  } catch (error) {
+    setArtifactStatus(`打开产物失败: ${error.message || error}`, true);
+  }
+}
+
+async function copyArtifactPath(path) {
+  if (!path) return;
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(path);
+    else {
+      const input = document.createElement('textarea');
+      input.value = path; input.style.position = 'fixed'; input.style.opacity = '0';
+      document.body.appendChild(input); input.select(); document.execCommand('copy'); input.remove();
+    }
+    setArtifactStatus(`路径已复制: ${path}`);
+  } catch (error) {
+    setArtifactStatus(`复制路径失败: ${error.message || error}`, true);
+  }
+}
+
+async function openConfiguredOutputRoot(feedback = $('#artifact-status')) {
+  try {
+    const result = await api.openOutputRoot();
+    const message = `已打开产物根目录: ${result.opened || ''}`;
+    if (feedback) feedback.textContent = message;
+    setArtifactStatus(message);
+  } catch (error) {
+    const message = `打开产物根目录失败: ${error.message || error}`;
+    if (feedback) feedback.textContent = message;
+    setArtifactStatus(message, true);
+  }
+}
+
 async function loadSettings() {
   try {
     const s = await fetch('/api/settings').then(r => r.json());
     $('#set-output-dir').value = s.output_dir || '';
   } catch (e) { /* noop */ }
+  loadEnvironment();
 }
+
 $('#btn-set-save').onclick = async () => {
   const out = $('#set-output-dir').value.trim();
   const r = await fetch('/api/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ output_dir: out }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ output_dir: out }),
   }).then(r => r.json());
   $('#set-status').textContent = r.ok ? `✓ 已保存 (${r.settings.output_dir})` : '保存失败';
+  if (r.ok) { loadEnvironment(); loadArtifactRuns(); }
   setTimeout(() => $('#set-status').textContent = '', 3000);
 };
+
+$('#btn-environment-refresh').onclick = () => loadEnvironment();
+$('#btn-environment-prepare').onclick = () => prepareEnvironment();
+$('#btn-artifact-refresh').onclick = () => loadArtifactRuns();
+$('#btn-artifact-output-root').onclick = () => openConfiguredOutputRoot();
+$('#artifact-search').oninput = () => renderArtifactRuns();
 
 /* ---------------- init ---------------- */
 loadList();
@@ -969,3 +1854,5 @@ loadAI();
 loadUE();
 loadSettings();
 loadEngines();
+loadArtifactRuns();
+scheduleArtifactCenterRefresh();

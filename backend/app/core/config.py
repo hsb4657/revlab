@@ -1,10 +1,11 @@
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parents[3]  # 项目根目录
+
+BASE_DIR = Path(__file__).resolve().parents[3]
 DATA_DIR = BASE_DIR / "data"
 SAMPLES_DIR = BASE_DIR / "samples"
-OUTPUT_ROOT = Path(os.environ.get("REVLAB_OUTPUT_DIR", str(BASE_DIR)))  # 分析产物根目录(可配置)
+OUTPUT_ROOT = Path(os.environ.get("REVLAB_OUTPUT_DIR", str(BASE_DIR)))
 REPORTS_DIR = OUTPUT_ROOT / "reports"
 CAPTURES_DIR = OUTPUT_ROOT / "captures"
 UNPACKED_DIR = OUTPUT_ROOT / "unpacked"
@@ -13,31 +14,44 @@ GHIDRA_DIR = BASE_DIR / "ghidra"
 TOOLS_DIR = BASE_DIR / "tools"
 WORKSPACE_DIR = BASE_DIR / "workspace"
 
-for _d in (DATA_DIR, SAMPLES_DIR, REPORTS_DIR, CAPTURES_DIR, UNPACKED_DIR,
-           GHIDRA_DIR, TOOLS_DIR, WORKSPACE_DIR, SDK_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
+for _directory in (
+    DATA_DIR,
+    SAMPLES_DIR,
+    REPORTS_DIR,
+    CAPTURES_DIR,
+    UNPACKED_DIR,
+    GHIDRA_DIR,
+    TOOLS_DIR,
+    WORKSPACE_DIR,
+    SDK_DIR,
+):
+    _directory.mkdir(parents=True, exist_ok=True)
 
 DB_PATH = DATA_DIR / "revlab.db"
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
-
-MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # 200MB 样本上限
+MAX_UPLOAD_SIZE = 200 * 1024 * 1024
 
 
 def _apply_output_root(root: Path):
-    """运行时切换分析产物输出目录。"""
+    """Switch analysis output directories at runtime."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
+    Config.OUTPUT_ROOT = root
     Config.REPORTS_DIR = root / "reports"
     Config.CAPTURES_DIR = root / "captures"
     Config.UNPACKED_DIR = root / "unpacked"
     Config.SDK_DIR = root / "sdk"
     Config.WORKSPACE_DIR = root / "workspace"
-    for _d in (Config.REPORTS_DIR, Config.CAPTURES_DIR, Config.UNPACKED_DIR,
-               Config.SDK_DIR, Config.WORKSPACE_DIR):
-        _d.mkdir(parents=True, exist_ok=True)
+    for directory in (
+        Config.REPORTS_DIR,
+        Config.CAPTURES_DIR,
+        Config.UNPACKED_DIR,
+        Config.SDK_DIR,
+        Config.WORKSPACE_DIR,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
 
 
-# 分析引擎开关(可被环境变量覆盖)
 class Config:
     BASE_DIR = BASE_DIR
     DATA_DIR = DATA_DIR
@@ -54,10 +68,22 @@ class Config:
     MAX_UPLOAD_SIZE = MAX_UPLOAD_SIZE
 
     ENABLE_GHIDRA = os.environ.get("REVLAB_ENABLE_GHIDRA", "1") == "1"
-    GHIDRA_HOME = os.environ.get("GHIDRA_HOME", "")
+    # The repository installer uses this path by default; GHIDRA_HOME can
+    # point to a system installation when a project-local runtime is undesired.
+    GHIDRA_HOME = os.environ.get("GHIDRA_HOME", str(GHIDRA_DIR / "runtime"))
     UPX_PATH = os.environ.get("UPX_PATH", str(TOOLS_DIR / "upx" / "upx.exe"))
-    PESIEVE_PATH = os.environ.get("PESIEVE_PATH", str(TOOLS_DIR / "pe-sieve" / "pe-sieve64.exe"))
-    VMWARE_RUN = os.environ.get("VMWARE_RUN", r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe")
+    PESIEVE_PATH = os.environ.get(
+        "PESIEVE_PATH", str(TOOLS_DIR / "pe-sieve" / "pe-sieve64.exe")
+    )
+    IL2CPP_DUMPER_PATH = os.environ.get(
+        "IL2CPP_DUMPER_PATH",
+        str(TOOLS_DIR / "unity-recovery" / "Il2CppDumper" / "Il2CppDumper"
+            / "bin" / "Release" / "net8.0" / "Il2CppDumper.exe"),
+    )
+    VMWARE_RUN = os.environ.get(
+        "VMWARE_RUN",
+        r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe",
+    )
     SANDBOX_TIMEOUT = int(os.environ.get("REVLAB_SANDBOX_TIMEOUT", "90"))
     SANDBOX_RUN_ARGS = os.environ.get("REVLAB_SANDBOX_ARGS", "")
     USE_SANDBOX_VM = os.environ.get("REVLAB_SANDBOX_VM", "0") == "1"
@@ -65,10 +91,11 @@ class Config:
     VM_GUEST_PATH = os.environ.get("REVLAB_VM_GUEST_PATH", "C:\\RevLab\\sample.exe")
     CAPTURE_DURATION = int(os.environ.get("REVLAB_CAPTURE_DURATION", "30"))
 
+
 config = Config()
 
 
-def resolve_sample_path(p) -> Path:
-    """将样本存储路径解析为绝对路径(兼容旧相对路径数据)。"""
-    path = Path(p)
+def resolve_sample_path(path_value) -> Path:
+    """Resolve a sample path while preserving absolute paths."""
+    path = Path(path_value)
     return path if path.is_absolute() else BASE_DIR / path

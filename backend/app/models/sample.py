@@ -113,10 +113,48 @@ class GraphTask(Base):
 
     id = Column(Integer, primary_key=True)
     workflow_id = Column(Integer, index=True)
+    sample_id = Column(Integer, index=True, default=0)
+    workflow_version = Column(String(64), default="")
     name = Column(String(128), default="")
     status = Column(String(32), default="pending")   # pending/running/completed/failed/stopped
+    status_version = Column(Integer, default=0)
+    cancel_requested = Column(Integer, default=0)
+    heartbeat_at = Column(DateTime)
     node_states = Column(JSON, default=dict)         # {node_id: {status, outputs, attempts, error, started_at, finished_at}}
     variables = Column(JSON, default=dict)           # 变量池(用户填参 + 节点输出)
     error = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AIChatSession(Base):
+    """Persistent AI conversation metadata.
+
+    The messages intentionally live in a separate table so a session can grow
+    without serializing an ever-growing JSON column on every reply.
+    """
+    __tablename__ = "ai_chat_sessions"
+
+    id = Column(String(36), primary_key=True)
+    title = Column(String(256), default="New conversation")
+    model = Column(String(256), default="")
+    reasoning = Column(String(32), default="balanced")
+    sample_id = Column(Integer, default=0, index=True)
+    system_prompt = Column(Text, default="")
+    summary = Column(Text, default="")
+    summary_upto = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AIChatMessage(Base):
+    """A single immutable turn in a persistent AI chat session."""
+    __tablename__ = "ai_chat_messages"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String(36), ForeignKey("ai_chat_sessions.id"), index=True)
+    role = Column(String(16), default="user")
+    content = Column(Text, default="")
+    model = Column(String(256), default="")
+    reasoning = Column(String(32), default="")
+    created_at = Column(DateTime, default=datetime.utcnow)

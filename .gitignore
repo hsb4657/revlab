@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.env
 
 # 运行时数据(本地生成,不入库)
 data/
@@ -11,20 +12,28 @@ reports/
 captures/
 unpacked/
 workspace/
+runs/
+sdk/
+work/
 ghidra/projects/
 ghidra/decomp/
 ghidra/*.log
+ghidra/runtime/
+ghidra/manual-project/
 *.db
 data/ai_config.json
 
 # 外部工具(体积大,自行下载)
 tools/upx/
 tools/pe-sieve/
+tools/downloads/
+tools/unity-recovery/
 
 # 日志与系统
 *.log
 .DS_Store
 Thumbs.db
+hs_err_pid*.log
 
 # IDE
 .idea/

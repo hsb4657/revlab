@@ -16,6 +16,7 @@ export const store = reactive({
   selectedNodeId: null,
   selectedEdgeId: null,
   currentTask: null,
+  contextSampleId: 0,
   taskHistory: [],
   running: false,
   output: null,
@@ -23,6 +24,23 @@ export const store = reactive({
 })
 
 let pollTimer = null
+let lastNotifiedTaskStatus = null
+
+function notifyHost(type, task, extra = {}) {
+  try {
+    if (!window.parent || window.parent === window) return
+    window.parent.postMessage({
+      source: 'revlab-workflow',
+      type,
+      workflowId: store.currentId,
+      taskId: task?.id || extra.taskId || 0,
+      status: task?.status || extra.status || '',
+      ...extra,
+    }, window.location.origin)
+  } catch (_) {
+    // Host notifications are optional when the editor runs standalone.
+  }
+}
 
 export function toast(msg, type = 'info') {
   store.toast = { msg, type, t: Date.now() }
@@ -195,7 +213,7 @@ export async function saveWorkflow() {
     edges: serializeEdges(),
     variables: store.variables,
   }
-  const v = await api.validate(body.nodes, body.edges)
+  const v = await api.validate(body.nodes, body.edges, body.variables)
   if (!v.valid && v.errors?.length) {
     const msg = '图校验未通过:\n- ' + v.errors.join('\n- ') + '\n\n仍然强制保存?'
     if (!window.confirm(msg)) {
@@ -239,17 +257,28 @@ function applyTaskStates(states) {
 export async function refreshTasks() {
   if (!store.currentId) return
   store.taskHistory = await api.listTasks(store.currentId)
+  const active = store.taskHistory.find((task) => ['running', 'pending'].includes(task.status))
+  if (active && (!store.currentTask || store.currentTask.id !== active.id)) {
+    store.currentTask = active
+    applyTaskStates(active.node_states || {})
+    startPolling(active.id)
+  }
 }
 
 export function startPolling(tid) {
   stopPolling()
   store.running = true
+  lastNotifiedTaskStatus = null
   const tick = async () => {
     try {
       const t = await api.getTask(store.currentId, tid)
       store.currentTask = t
       applyTaskStates(t.node_states || {})
       const terminal = ['completed', 'failed', 'stopped'].includes(t.status)
+      if (t.status !== lastNotifiedTaskStatus) {
+        lastNotifiedTaskStatus = t.status
+        notifyHost(terminal ? 'workflow-task-completed' : 'workflow-task-status', t)
+      }
       if (terminal) {
         stopPolling()
         await refreshTasks()
@@ -282,12 +311,18 @@ export async function runWorkflow() {
     const rv = store.runtimeVals[v.key]
     if (v.key && rv !== undefined && rv !== '') vals[v.key] = rv
   }
-  const r = await api.createTask(id, { name: `${store.wfName}#${Date.now().toString().slice(-6)}`, variables: vals })
+  const r = await api.createTask(id, {
+    name: `${store.wfName}#${Date.now().toString().slice(-6)}`,
+    variables: vals,
+    sample_id: store.contextSampleId || 0,
+  })
   const tid = r.id
+  notifyHost('workflow-task-created', { id: tid, status: 'pending' })
   for (const vn of store.nodes) { vn.data.status = 'pending'; vn.data.outputs = null; vn.data.error = '' }
   store.currentTask = null
   store.output = null
   await api.runTask(id, tid)
+  notifyHost('workflow-task-status', { id: tid, status: 'running' })
   startPolling(tid)
   await refreshTasks()
   toast('任务已启动', 'ok')
@@ -298,6 +333,7 @@ export async function stopWorkflow() {
   await api.stopTask(store.currentId, store.currentTask.id)
   stopPolling()
   await refreshCurrent()
+  notifyHost('workflow-task-completed', store.currentTask)
   await refreshTasks()
   toast('已发送停止', 'ok')
 }
@@ -326,4 +362,5 @@ export async function switchTask(tid) {
   const t = await api.getTask(store.currentId, tid)
   store.currentTask = t
   applyTaskStates(t.node_states || {})
+  if (['running', 'pending'].includes(t.status)) startPolling(tid)
 }

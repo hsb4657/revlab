@@ -348,6 +348,293 @@ def engine_analyses(engine: str) -> str:
     return _j(list_analyses(engine))
 
 
+# ================================================================ 图化工作流(MCP 完全接入)
+@mcp.tool()
+def wf_workflows() -> str:
+    """列出全部图化工作流(内置模板与自定义),含节点/边数量。"""
+    from app.workflow_engine import manager as wfm
+    return _j(wfm.list_workflows())
+
+
+@mcp.tool()
+def wf_get(workflow_id: int) -> str:
+    """获取工作流完整定义:节点列表(类型/参数)、边、运行变量。"""
+    from app.workflow_engine import manager as wfm
+    return _j(wfm.get_workflow(workflow_id))
+
+
+@mcp.tool()
+def wf_node_types() -> str:
+    """列出节点注册表(所有可用节点类型/参数 schema),用于理解工作流能力。"""
+    from app.workflow_engine.nodes.base import list_node_types
+    return _j(list_node_types())
+
+
+@mcp.tool()
+def wf_create_task(workflow_id: int, name: str = "", sample_path: str = "",
+                   sample_id: int = 0, variables: str = "{}") -> str:
+    """为工作流创建运行任务。sample_path 为样本绝对路径(自动登记为运行变量);
+    variables 为 JSON 对象字符串(其它运行变量,如 {"ue_version":"5.5"})。"""
+    import json as _json
+    from app.workflow_engine import manager as wfm
+    try:
+        extra = _json.loads(variables or "{}")
+    except ValueError as e:
+        return _j({"ok": False, "error": f"variables 不是合法 JSON: {e}"})
+    runtime = dict(extra)
+    if sample_path:
+        runtime.setdefault("sample_path", sample_path)
+    try:
+        r = wfm.create_task(int(workflow_id), name=name, variables=runtime,
+                            sample_id=int(sample_id))
+        return _j({"ok": True, "task_id": r.get("id")})
+    except ValueError as e:
+        return _j({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+def wf_run_task(task_id: int) -> str:
+    """启动工作流任务(后台执行)。之后用 wf_task 轮询状态。"""
+    from app.workflow_engine import manager as wfm
+    try:
+        return _j(wfm.run_task(int(task_id)))
+    except ValueError as e:
+        return _j({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+def wf_task(task_id: int) -> str:
+    """查询任务状态:整体状态/错误、每个节点状态与输出、变量池。"""
+    from app.workflow_engine import manager as wfm
+    t = wfm.get_task(int(task_id))
+    if not t:
+        return _j({"ok": False, "error": f"task #{task_id} not found"})
+    return _j(t)
+
+
+@mcp.tool()
+def wf_task_outputs(task_id: int, node_id: str = "") -> str:
+    """提取任务中指定节点(或全部)的输出证据(变量池),精简后返回。
+    用于让外部 AI 读取工作流各节点产出的分析证据。"""
+    import json as _json
+    from app.workflow_engine import manager as wfm
+
+    def _trim(v, depth=0):
+        if depth > 3:
+            return "..."
+        if isinstance(v, str):
+            return v[:4000]
+        if isinstance(v, list):
+            return [_trim(i, depth + 1) for i in v[:40]]
+        if isinstance(v, dict):
+            return {str(k)[:64]: _trim(i, depth + 1) for k, i in list(v.items())[:60]}
+        return v
+
+    t = wfm.get_task(int(task_id))
+    if not t:
+        return _j({"ok": False, "error": f"task #{task_id} not found"})
+    states = t.get("node_states") or {}
+    if node_id:
+        st = states.get(node_id)
+        if not st:
+            return _j({"ok": False, "error": f"node '{node_id}' not found"})
+        return _j({"node": node_id, "status": st.get("status"),
+                   "error": st.get("error", ""), "outputs": _trim(st.get("outputs") or {})})
+    return _j({
+        "task_id": task_id,
+        "status": t.get("status"),
+        "nodes": {
+            nid: {
+                "status": st.get("status"),
+                "error": st.get("error", ""),
+                "summary": (st.get("outputs") or {}).get("__summary", ""),
+                "outputs": _trim({k: v for k, v in (st.get("outputs") or {}).items()
+                                  if k not in ("__summary", "evidence", "raw_response")}),
+            }
+            for nid, st in states.items()
+        },
+        "variables": _trim({k: v for k, v in (t.get("variables") or {}).items()
+                            if not str(k).startswith("_")}),
+    })
+
+
+@mcp.tool()
+def wf_retry_node(task_id: int, node_id: str) -> str:
+    """重跑任务中的单个节点(及其后未完成节点)。"""
+    from app.workflow_engine.engine import retry_node
+    return _j(retry_node(int(task_id), str(node_id)))
+
+
+@mcp.tool()
+def wf_skip_node(task_id: int, node_id: str) -> str:
+    """跳过任务中的单个节点。"""
+    from app.workflow_engine.engine import skip_node
+    return _j(skip_node(int(task_id), str(node_id)))
+
+
+@mcp.tool()
+def wf_stop_task(task_id: int) -> str:
+    """停止运行中的任务。"""
+    from app.workflow_engine.engine import stop_task
+    return _j({"ok": stop_task(int(task_id))})
+
+
+@mcp.tool()
+def wf_resolve_ai(task_id: int, node_id: str, ai_result: str = "{}") -> str:
+    """外部 AI 提交分析结论(写入任务变量池的 _ai_decision_{node_id} 键)。
+    之后调用 wf_retry_node(task_id, node_id) 重跑节点,节点将自动应用此结论。
+    ai_result 为 JSON 字符串,结构需含 ai_output:true 标记(自动补充)。"""
+    import json as _json
+    from app.core.database import SessionLocal
+    from app.models.sample import GraphTask
+    try:
+        payload = _json.loads(ai_result or "{}")
+    except ValueError as e:
+        return _j({"ok": False, "error": f"ai_result 不是合法 JSON: {e}"})
+    if not isinstance(payload, dict):
+        return _j({"ok": False, "error": "ai_result 必须是 JSON 对象"})
+    payload["ai_output"] = True
+    payload["configured"] = True
+    payload["source"] = "external_ai_via_mcp"
+    db = SessionLocal()
+    try:
+        t = db.query(GraphTask).filter(GraphTask.id == int(task_id)).first()
+        if not t:
+            return _j({"ok": False, "error": f"task #{task_id} not found"})
+        variables = dict(t.variables or {})
+        variables[f"_ai_decision_{str(node_id)}"] = payload
+        t.variables = variables
+        db.commit()
+        return _j({"ok": True, "task_id": int(task_id), "node": str(node_id),
+                   "next_step": f"调用 wf_retry_node({task_id}, '{node_id}') 重跑节点以应用结论"})
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def wf_list_tasks(workflow_id: int, limit: int = 20) -> str:
+    """列出指定工作流的历史任务。"""
+    from app.workflow_engine import manager as wfm
+    return _j(wfm.list_tasks(int(workflow_id), limit))
+
+
+@mcp.tool()
+def wf_ue_assist(sample_id: int, version: str = "") -> str:
+    """UE AI 辅助证据包:为外部 AI 直接提供可分析的静态证据
+    (三大件候选/签名命中/GetName 反汇编/XOR 密钥/加密信号),无需内部 LLM 配置。"""
+    from app.services import pe_parser
+    from app.services.ue import ai_assist
+    from app.services.ue.analyzer import analyze_sample
+    s = _sample(sample_id)
+    data = Path(s.stored_path).read_bytes()
+    pe = pe_parser.parse_pe(data, s.stored_path)
+    result = analyze_sample(sample_id, version=version)
+    evidence = ai_assist.build_ue_evidence(result, data, pe)
+    return _j({"ok": True, "evidence": evidence})
+
+
+@mcp.tool()
+def wf_ai_inject(task_id: int, node_name: str = "ue_ai_assist", ai_result: str = "{}") -> str:
+    """将外部 AI 的辅助分析结论注入任务变量池(自动打 ai_output 标记)。
+    报告节点(ue_report / report / unity_report)渲染时会收集并展示。
+    注入后调用 wf_retry_node(task_id, report节点id) 重跑报告节点即可生效。
+    结构约定(ue_ai_assist):
+      three_majors.{gobjects,gnames,gworld,gengine}.{rva,rva_hex,absolute_va_hex,confidence,reason}
+      getname_algorithm.{model,block_bits,entry_stride,header_info_offset,wide_bit,length_shift,key_hex,description,steps}
+      decryption_algorithm.{detected,algorithm,key_hex,description,steps}
+      notes:[...]"""
+    import json as _json
+    from app.core.database import SessionLocal
+    from app.models.sample import GraphTask
+    try:
+        payload = _json.loads(ai_result or "{}")
+    except ValueError as e:
+        return _j({"ok": False, "error": f"ai_result 不是合法 JSON: {e}"})
+    if not isinstance(payload, dict):
+        return _j({"ok": False, "error": "ai_result 必须是 JSON 对象"})
+    payload["ai_output"] = True
+    payload["configured"] = True
+    payload["source"] = "mcp_external_ai"
+    db = SessionLocal()
+    try:
+        t = db.query(GraphTask).filter(GraphTask.id == int(task_id)).first()
+        if not t:
+            return _j({"ok": False, "error": f"task #{task_id} not found"})
+        variables = dict(t.variables or {})
+        variables[str(node_name)] = payload
+        states = dict(t.node_states or {})
+        st = dict(states.get(str(node_name)) or {})
+        st["outputs"] = payload
+        st["status"] = st.get("status", "completed")
+        states[str(node_name)] = st
+        t.variables = variables
+        t.node_states = states
+        db.commit()
+        return _j({"ok": True, "task_id": t.id, "node": str(node_name),
+                   "hint": "调用 wf_retry_node 重跑报告节点后,报告将包含 AI 辅助分析章节"})
+    finally:
+        db.close()
+
+
+@mcp.tool()
+async def wf_regen_report(task_id: int, node_id: str = "report") -> str:
+    """同步重新生成报告节点(不经过引擎调度)。用于外部 AI 注入结论(wf_ai_inject)后
+    立即刷新报告。node_id 取报告节点 id(ue_report / report / unity_report)。"""
+    from app.core.database import SessionLocal
+    from app.models.sample import GraphTask, GraphWorkflow
+    from app.workflow_engine.nodes.base import get_node_class
+    from app.workflow_engine.variables import resolve
+    from app.services.artifacts import task_output_directory
+    db = SessionLocal()
+    try:
+        t = db.query(GraphTask).filter(GraphTask.id == int(task_id)).first()
+        if not t:
+            return _j({"ok": False, "error": f"task #{task_id} not found"})
+        wf = db.query(GraphWorkflow).filter(GraphWorkflow.id == t.workflow_id).first()
+        node_def = next((n for n in (wf.nodes or []) if n.get("id") == str(node_id)), None)
+        if node_def is None:
+            return _j({"ok": False, "error": f"workflow 中无节点 '{node_id}'"})
+        cls = get_node_class(node_def.get("type"))
+        if cls is None:
+            return _j({"ok": False, "error": f"未知节点类型: {node_def.get('type')}"})
+        params = dict(node_def.get("params") or {})
+        variables = dict(t.variables or {})
+        for k, v in params.items():
+            if isinstance(v, str) and "{{" in v:
+                params[k] = resolve(v, variables)
+        ctx = {"node": node_def, "params": params, "pool": variables,
+               "task_id": t.id, "output_dir": str(task_output_directory(t.id))}
+    finally:
+        db.close()
+    try:
+        res = await cls().execute(ctx)
+    except Exception as e:
+        return _j({"ok": False, "error": f"报告节点执行异常: {e}"})
+    outputs = getattr(res, "outputs", None)
+    if getattr(res, "status", "failed") == "failed":
+        return _j({"ok": False, "error": getattr(res, "error", "unknown")})
+    db = SessionLocal()
+    try:
+        t = db.query(GraphTask).filter(GraphTask.id == int(task_id)).first()
+        variables = dict(t.variables or {})
+        variables[str(node_id)] = outputs
+        states = dict(t.node_states or {})
+        st = dict(states.get(str(node_id)) or {})
+        st["status"] = "completed"
+        st["outputs"] = outputs
+        st["error"] = ""
+        states[str(node_id)] = st
+        t.variables = variables
+        t.node_states = states
+        db.commit()
+        paths = (outputs or {}).get("report_paths") or {}
+        return _j({"ok": True, "node": str(node_id),
+                   "summary": getattr(res, "summary", ""),
+                   "report_paths": paths})
+    finally:
+        db.close()
+
+
 def main():
     ap = argparse.ArgumentParser(description="REVLab MCP Server")
     ap.add_argument("--port", type=int, default=0, help="HTTP 端口(设置则启用 streamable-http,否则 stdio)")

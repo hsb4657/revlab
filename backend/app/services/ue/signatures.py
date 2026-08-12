@@ -27,7 +27,7 @@ BUILTIN_SIGNATURES: list = [
     {
         "name": "GObjects_UE5",
         "signature": "48 8B 05 ?? ?? ?? ?? 48 8B 0C C8 48 8D 04 D1 48 89",
-        "offset": 4, "rel": True, "versions": ["5.3", "5.4", "5.5"],
+        "offset": 4, "rel": True, "versions": ["5.0", "5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7", "5.8"],
         "desc": "UE5 FChunkedFixedUObjectArray 访问",
     },
     {
@@ -40,13 +40,13 @@ BUILTIN_SIGNATURES: list = [
     {
         "name": "GNames_Pool",
         "signature": "48 8D 05 ?? ?? ?? ?? 0F B7 14 48",
-        "offset": 4, "rel": True, "versions": ["4.23", "4.24", "4.25", "4.26", "4.27", "5.0", "5.1", "5.2", "5.3", "5.4", "5.5"],
+        "offset": 4, "rel": True, "versions": ["4.23", "4.24", "4.25", "4.26", "4.27", "5.0", "5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7", "5.8"],
         "desc": "lea rax,[rip+?] FNamePool 基址",
     },
     {
         "name": "GNames_Pool_v2",
         "signature": "48 8D 05 ?? ?? ?? ?? 66 89 04 48",
-        "offset": 4, "rel": True, "versions": ["5.2", "5.3", "5.4", "5.5"],
+        "offset": 4, "rel": True, "versions": ["5.2", "5.3", "5.4", "5.5", "5.6", "5.7", "5.8"],
         "desc": "FNamePool + IndexToName 加速表写入",
     },
     {
@@ -77,7 +77,7 @@ BUILTIN_SIGNATURES: list = [
     {
         "name": "GWorld_UE5",
         "signature": "48 8B 1D ?? ?? ?? ?? 48 8B 5D D0",
-        "offset": 4, "rel": True, "versions": ["5.0", "5.1", "5.2", "5.3", "5.4", "5.5"],
+        "offset": 4, "rel": True, "versions": ["5.0", "5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7", "5.8"],
         "desc": "UE5 GWorld 引用",
     },
     # ---------------- GEngine / 辅助 ----------------
@@ -143,19 +143,44 @@ def scan_signature(data: bytes, entry: dict, max_hits: int = 8):
     pattern = _parse_sig(entry["signature"])
     n = len(pattern)
     hits = []
+    if n == 0 or len(data) < n:
+        return hits
     # imm 起点:优先取首个 '??' 通配位置(标准 RIP-relative 布局),否则回退 entry['offset']
     try:
         imm_start = pattern.index(None)
     except ValueError:
         imm_start = int(entry.get("offset", 4))
-    rel_off = imm_start
-    i = 0
-    while i <= len(data) - n:
-        ok = True
-        for j, b in enumerate(pattern):
-            if b is not None and data[i + j] != b:
-                ok = False
-                break
+    # Locate the longest fixed run with bytes.find(), implemented in C, then
+    # verify the full wildcard pattern only at those candidate locations. A
+    # byte-by-byte Python walk is prohibitively slow for multi-hundred-MB UE
+    # dumps and produces exactly the same result with much more work.
+    anchor_start = 0
+    anchor_size = 0
+    current_start = 0
+    current_size = 0
+    for index, value in enumerate(pattern):
+        if value is None:
+            if current_size > anchor_size:
+                anchor_start, anchor_size = current_start, current_size
+            current_start = index + 1
+            current_size = 0
+        else:
+            current_size += 1
+    if current_size > anchor_size:
+        anchor_start, anchor_size = current_start, current_size
+    if not anchor_size:
+        return hits
+    anchor = bytes(pattern[anchor_start:anchor_start + anchor_size])
+    search_at = 0
+    while search_at <= len(data) - anchor_size:
+        found_at = data.find(anchor, search_at)
+        if found_at < 0:
+            break
+        i = found_at - anchor_start
+        search_at = found_at + 1
+        if i < 0 or i + n > len(data):
+            continue
+        ok = all(value is None or data[i + index] == value for index, value in enumerate(pattern))
         if ok:
             target = None
             if entry.get("rel"):
@@ -166,7 +191,4 @@ def scan_signature(data: bytes, entry: dict, max_hits: int = 8):
                          "target": target, "imm_start": imm_start if entry.get("rel") else None})
             if len(hits) >= max_hits:
                 break
-            i += n
-        else:
-            i += 1
     return hits

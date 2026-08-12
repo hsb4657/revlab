@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .api.routes import router as api_router
 from .api.workflow2_routes import router as wf2_router
+from .api.artifact_routes import router as artifact_router
 from .core.config import BASE_DIR
 from .core.database import init_db
 
@@ -30,9 +31,12 @@ def _startup():
     init_builtin_templates()
     from .workflow_engine.engine import recover_engine_tasks
     recover_engine_tasks()
+    from .services.environment import ensure_environment_async
+    ensure_environment_async()
 
 app.include_router(api_router)
 app.include_router(wf2_router)
+app.include_router(artifact_router)
 
 # 静态前端
 _frontend = Path(__file__).resolve().parents[2] / "frontend"

@@ -7,3 +7,4 @@ sqlalchemy>=2.0
 python-multipart>=0.0.9
 psutil>=5.9
 pydantic>=2.5
+cryptography>=42.0

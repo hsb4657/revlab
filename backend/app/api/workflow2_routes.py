@@ -17,7 +17,8 @@ def wf2_spec():
 
 @router.post("/validate")
 def wf2_validate(payload: dict):
-    valid, errors = dfn.validate_graph(payload.get("nodes") or [], payload.get("edges") or [])
+    valid, errors = dfn.validate_graph(payload.get("nodes") or [], payload.get("edges") or [],
+                                        payload.get("variables") or [])
     return {"valid": valid, "errors": errors}
 
 
@@ -34,6 +35,11 @@ def wf2_create(payload: dict):
                                    payload.get("variables"))
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@router.get("/samples/{sample_id}/tasks")
+def wf2_list_sample_tasks(sample_id: int, limit: int = Query(100)):
+    return wfm.list_sample_tasks(sample_id, limit)
 
 
 @router.get("/{wf_id}")
@@ -64,7 +70,8 @@ def wf2_delete(wf_id: int):
 def wf2_create_task(wf_id: int, payload: dict = None):
     try:
         return wfm.create_task(wf_id, (payload or {}).get("name", ""),
-                               (payload or {}).get("variables"))
+                               (payload or {}).get("variables"),
+                               (payload or {}).get("sample_id", 0))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -74,7 +81,21 @@ def wf2_run_task(wf_id: int, task_id: int):
     t = wfm.get_task(task_id)
     if not t or t["workflow_id"] != wf_id:
         raise HTTPException(404, "task not found")
-    return wfm.run_task(task_id)
+    from ..services.environment import ensure_environment_async
+    environment = ensure_environment_async()
+    if not environment.get("ready"):
+        raise HTTPException(
+            503,
+            {
+                "message": "Environment setup is in progress",
+                "missing": environment.get("missing", []),
+                "job": environment.get("job", {}),
+            },
+        )
+    try:
+        return wfm.run_task(task_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
 
 
 @router.post("/{wf_id}/tasks/{task_id}/stop")

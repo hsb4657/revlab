@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 
 from ..core.database import SessionLocal
-from ..models.sample import GraphWorkflow, GraphTask
+from ..models.sample import GraphWorkflow, GraphTask, Sample
 from . import definition as dfn
 from .engine import start_engine
 
@@ -15,7 +15,7 @@ def create_workflow(name: str, description: str = "", nodes=None, edges=None,
     try:
         if db.query(GraphWorkflow).filter(GraphWorkflow.name == name).first():
             raise ValueError(f"工作流 '{name}' 已存在")
-        valid, errs = dfn.validate_graph(nodes or [], edges or [])
+        valid, errs = dfn.validate_graph(nodes or [], edges or [], variables or [])
         if not valid:
             raise ValueError("; ".join(errs))
         wf = GraphWorkflow(name=name, description=description, nodes=nodes or [],
@@ -33,10 +33,10 @@ def update_workflow(wf_id: int, **kw) -> dict:
         wf = db.query(GraphWorkflow).filter(GraphWorkflow.id == wf_id).first()
         if not wf:
             raise ValueError("工作流不存在")
-        if "nodes" in kw or "edges" in kw:
+        if "nodes" in kw or "edges" in kw or "variables" in kw:
             nodes = kw.get("nodes", wf.nodes or [])
             edges = kw.get("edges", wf.edges or [])
-            valid, errs = dfn.validate_graph(nodes, edges)
+            valid, errs = dfn.validate_graph(nodes, edges, kw.get("variables", wf.variables or []))
             if not valid:
                 raise ValueError("; ".join(errs))
         for k in ("name", "description", "nodes", "edges", "variables", "enabled"):
@@ -89,7 +89,8 @@ def get_workflow(wf_id: int) -> dict | None:
 
 
 # ---------------------------------------------------------------- tasks
-def create_task(wf_id: int, name: str = "", variables: dict = None) -> dict:
+def create_task(wf_id: int, name: str = "", variables: dict = None,
+                sample_id: int = 0) -> dict:
     db = SessionLocal()
     try:
         wf = db.query(GraphWorkflow).filter(GraphWorkflow.id == wf_id).first()
@@ -97,9 +98,31 @@ def create_task(wf_id: int, name: str = "", variables: dict = None) -> dict:
             raise ValueError("工作流不存在")
         if not wf.enabled:
             raise ValueError("工作流已禁用")
-        t = GraphTask(workflow_id=wf_id, name=name or wf.name,
-                      status="pending", variables=dict(variables or {}),
-                      node_states={})
+        runtime_variables = dict(variables or {})
+        if sample_id:
+            sample = db.query(Sample).filter(Sample.id == int(sample_id)).first()
+            if not sample:
+                raise ValueError("样本不存在")
+            runtime_variables.setdefault("sample_id", sample.id)
+            runtime_variables.setdefault("sample_path", sample.stored_path)
+        for spec in (wf.variables or []):
+            key = spec.get("key")
+            if not key:
+                continue
+            if key not in runtime_variables:
+                runtime_variables[key] = spec.get("default")
+            value = runtime_variables.get(key)
+            if spec.get("required") and (value is None or value == ""):
+                raise ValueError(f"运行变量缺少必填值: {key}")
+            vtype = spec.get("type", "text")
+            if vtype == "bool" and isinstance(value, str):
+                runtime_variables[key] = value.strip().lower() in {"1", "true", "yes", "on"}
+            elif vtype == "number" and value not in (None, ""):
+                runtime_variables[key] = float(value) if "." in str(value) else int(value)
+        t = GraphTask(workflow_id=wf_id, sample_id=int(sample_id or 0),
+                      workflow_version=str(wf.updated_at or wf.created_at or ""),
+                      name=name or wf.name, status="pending", status_version=0,
+                      cancel_requested=0, variables=runtime_variables, node_states={})
         db.add(t)
         db.commit()
         return {"ok": True, "id": t.id}
@@ -108,7 +131,29 @@ def create_task(wf_id: int, name: str = "", variables: dict = None) -> dict:
 
 
 def run_task(task_id: int) -> dict:
-    start_engine(task_id)
+    db = SessionLocal()
+    try:
+        task = db.query(GraphTask).filter(GraphTask.id == task_id).first()
+        if not task:
+            raise ValueError("任务不存在")
+        if task.status not in ("pending", "stopped", "failed"):
+            raise ValueError(f"任务当前状态不允许启动: {task.status}")
+        task.cancel_requested = 0
+        task.status = "pending"
+        task.status_version = (task.status_version or 0) + 1
+        db.commit()
+    finally:
+        db.close()
+    if not start_engine(task_id):
+        db = SessionLocal()
+        try:
+            task = db.query(GraphTask).filter(GraphTask.id == task_id).first()
+            if task and task.status == "pending" and not task.cancel_requested:
+                task.status = "running"
+                db.commit()
+        finally:
+            db.close()
+        raise ValueError("任务已经在运行")
     return {"ok": True, "status": "started"}
 
 
@@ -123,6 +168,21 @@ def list_tasks(wf_id: int = None, limit: int = 100) -> list:
                  "status": t.status, "error": t.error,
                  "node_states": t.node_states or {},
                  "variables": t.variables or {},
+                 "sample_id": t.sample_id or 0, "created_at": t.created_at.isoformat() + "Z" if t.created_at else None}
+                for t in rows]
+    finally:
+        db.close()
+
+
+def list_sample_tasks(sample_id: int, limit: int = 100) -> list:
+    db = SessionLocal()
+    try:
+        rows = db.query(GraphTask).filter(GraphTask.sample_id == sample_id) \
+            .order_by(GraphTask.id.desc()).limit(limit).all()
+        return [{"id": t.id, "workflow_id": t.workflow_id, "sample_id": t.sample_id or 0,
+                 "name": t.name, "status": t.status, "error": t.error,
+                 "node_states": t.node_states or {}, "variables": t.variables or {},
+                 "heartbeat_at": t.heartbeat_at.isoformat() + "Z" if t.heartbeat_at else None,
                  "created_at": t.created_at.isoformat() + "Z" if t.created_at else None}
                 for t in rows]
     finally:
@@ -138,6 +198,7 @@ def get_task(task_id: int) -> dict | None:
         return {"id": t.id, "workflow_id": t.workflow_id, "name": t.name,
                 "status": t.status, "error": t.error,
                 "node_states": t.node_states or {}, "variables": t.variables or {},
+                "sample_id": t.sample_id or 0, "heartbeat_at": t.heartbeat_at.isoformat() + "Z" if t.heartbeat_at else None,
                 "created_at": t.created_at.isoformat() + "Z" if t.created_at else None}
     finally:
         db.close()
@@ -158,66 +219,159 @@ def _edge(eid, frm, to, condition=None, is_default=None):
 
 
 def init_builtin_templates():
-    """初始化预置图工作流模板(PE 全自动 / 引擎专项)。"""
+    """Create or upgrade the three built-in executable workflow templates."""
     db = SessionLocal()
     try:
-        def add(name, desc, nodes, edges, variables=None):
-            if db.query(GraphWorkflow).filter(GraphWorkflow.name == name).first():
-                return
-            wf = GraphWorkflow(name=name, description=desc, nodes=nodes, edges=edges,
-                               variables=variables or [], is_builtin=1)
-            db.add(wf)
+        def upsert(name, desc, nodes, edges, variables):
+            valid, errors = dfn.validate_graph(nodes, edges, variables)
+            if not valid:
+                raise ValueError(f"invalid built-in workflow {name}: {'; '.join(errors)}")
+            workflow = db.query(GraphWorkflow).filter(GraphWorkflow.name == name).first()
+            if workflow is None:
+                workflow = GraphWorkflow(name=name, is_builtin=1)
+                db.add(workflow)
+            workflow.description = desc
+            workflow.nodes = copy.deepcopy(nodes)
+            workflow.edges = copy.deepcopy(edges)
+            workflow.variables = copy.deepcopy(variables)
+            workflow.is_builtin = 1
+            workflow.enabled = 1
 
-        # --- PE 全自动 ---
-        add("pe-auto", "PE 全自动:识别→壳检测→(条件)脱壳→反汇编→报告",
+        upsert(
+            "pe-auto",
+            "PE 分层分析:静态识别→多壳/保护证据矩阵→策略分派(专用解包/内存转储/人工复核)→反汇编→Ghidra→报告",
             [
-                _node("pe_identify", "PE 识别", "pe_identify", {"sample_path": "{{sample_path}}"}, 0, 0),
-                _node("packer_detect", "壳检测", "packer_detect", {}, 260, 0),
-                _node("cond_unpack", "是否加壳?", "condition", {"expression": "{{packer_detect.packed}} == true"}, 520, 0),
-                _node("unpack", "自动脱壳", "unpack", {}, 780, 0),
-                _node("disassemble", "反汇编入口", "disassemble", {"max_insns": 3000}, 1040, 0),
-                _node("report", "聚合报告", "report", {}, 1300, 0),
+                _node("pe_identify", "PE 静态识别", "pe_identify", {"sample_path": "{{sample_path}}"}, 0, 120),
+                _node("packer_detect", "壳与保护检测", "packer_detect", {}, 260, 40),
+                _node("strings", "字符串与 PDB", "strings", {"min_len": 6, "interesting_only": False}, 260, 220),
+                _node("pe_protection_matrix", "多壳/保护证据矩阵", "pe_protection_matrix", {"sample_path": "{{sample_path}}"}, 540, 40),
+                _node("pe_unpack_strategy", "脱壳策略分派", "pe_unpack_strategy", {"sample_path": "{{sample_path}}"}, 800, 40),
+                _node("cond_unpack_strategy", "是否使用专用解包", "condition", {}, 1060, 40),
+                _node("unpack", "专用解包并验证产物", "unpack", {}, 1320, 0),
+                _node("cond_dynamic", "是否需要内存转储", "condition", {}, 1320, 150),
+                _node("approval", "内存转储/动态分析确认", "approval", {"message": "确认开始内存转储或动态行为分析"}, 1580, 150),
+                _node("dynamic", "内存转储/动态行为分析", "dynamic_analyze", {"timeout": 60}, 1840, 150),
+                _node("disassemble", "反汇编与入口分析", "disassemble", {"max_insns": 3000}, 1580, 20),
+                _node("decompile", "Ghidra 反编译", "decompile", {"max_functions": 200}, 1840, 20),
+                _node("ai_review", "AI 辅助解读(壳/可疑点/建议)", "ai_analyze", {
+                    "system_prompt": "你是资深 Windows 二进制逆向工程师,基于给定的静态分析数据输出中文结论。",
+                    "prompt": "综合分析以下 PE 静态数据:\n1. 壳/保护判定结论与置信度\n2. 可疑点、恶意行为线索\n3. 下一步逆向建议\n\n壳检测:\n{{packer_detect}}\n\n保护证据矩阵:\n{{pe_protection_matrix}}\n\n脱壳策略:\n{{pe_unpack_strategy}}\n\n反汇编摘要:\n{{disassemble}}",
+                    "output_mode": "json", "on_fail": "skip",
+                }, 2100, -120),
+                _node("report", "证据聚合报告", "report", {"title": "PE 分层分析报告", "sample_path": "{{sample_path}}"}, 2360, 20),
             ],
             [
-                _edge("e1", "pe_identify", "packer_detect"),
-                _edge("e2", "packer_detect", "cond_unpack"),
-                _edge("e3", "cond_unpack", "unpack", condition="{{packer_detect.packed}} == true"),
-                _edge("e4", "cond_unpack", "disassemble", is_default=True),
-                _edge("e5", "unpack", "disassemble"),
-                _edge("e6", "disassemble", "report"),
+                _edge("pe_e1", "pe_identify", "packer_detect"),
+                _edge("pe_e2", "pe_identify", "strings"),
+                _edge("pe_e3", "packer_detect", "pe_protection_matrix"),
+                _edge("pe_e4", "pe_protection_matrix", "pe_unpack_strategy"),
+                _edge("pe_e5", "pe_unpack_strategy", "cond_unpack_strategy"),
+                _edge("pe_e6", "cond_unpack_strategy", "unpack", condition="{{pe_unpack_strategy.selected_strategy}} == \"known_unpacker\""),
+                _edge("pe_e7", "cond_unpack_strategy", "cond_dynamic", is_default=True),
+                _edge("pe_e8", "unpack", "disassemble"),
+                _edge("pe_e9", "cond_dynamic", "approval", condition="{{pe_unpack_strategy.selected_strategy}} == \"memory_dump\""),
+                _edge("pe_e10", "cond_dynamic", "disassemble", is_default=True),
+                _edge("pe_e11", "approval", "dynamic"),
+                _edge("pe_e12", "dynamic", "disassemble"),
+                _edge("pe_e13", "disassemble", "decompile"),
+                _edge("pe_e14", "decompile", "ai_review"),
+                _edge("pe_e14b", "ai_review", "report"),
+                _edge("pe_e15", "strings", "report"),
             ],
-            [{"key": "sample_path", "name": "样本路径", "type": "text", "default": "", "required": True,
-              "source_type": "input"}],
+            [
+                {"key": "sample_path", "name": "样本路径", "type": "text", "default": "", "required": True, "source_type": "input"},
+                {"key": "run_dynamic", "name": "执行动态分析", "type": "bool", "default": False, "required": False, "source_type": "input"},
+            ],
         )
 
-        # --- UE 引擎专项 ---
-        add("ue-special", "UE 虚幻引擎专项:识别→(可选源码)→三大件→反射→加密解密→报告",
+        upsert(
+            "ue-special",
+            "UE 专项:PE/Dump 基线→UE4/UE5 版本→字符串/RIP 全局候选→三大件→FName/GetName XOR→反射结构/偏移→保护/加密分支→运行时验证计划→报告",
             [
-                _node("pe_identify", "PE 识别", "pe_identify", {"sample_path": "{{sample_path}}"}, 0, 0),
-                _node("ue_analyze", "UE 引擎分析", "ue_analyze", {"version": ""}, 300, 0),
-                _node("report", "UE 专项报告", "report", {"title": "UE 分析报告"}, 600, 0),
+                _node("pe_identify", "PE 与 Dump 基线", "pe_identify", {"sample_path": "{{sample_path}}"}, 0, 100),
+                _node("strings", "UE 字符串与符号线索", "strings", {"min_len": 5, "interesting_only": False}, 280, 220),
+                _node("ue_version", "UE 版本与引擎家族", "ue_version", {"sample_path": "{{sample_path}}", "version": "{{ue_version}}"}, 560, 40),
+                _node("ue_static_evidence", "字符串引用与 RIP 全局候选", "ue_static_evidence", {"sample_path": "{{sample_path}}"}, 820, 220),
+                _node("ue_globals", "GObjects / GNames / GWorld / GEngine", "ue_globals", {"sample_path": "{{sample_path}}"}, 1100, 40),
+                _node("ue_fname", "FName / GNames 算法候选(UE4/UE5)", "ue_fname", {"sample_path": "{{sample_path}}"}, 1380, 40),
+                _node("ue_getname_xor", "GetName XOR / 明文候选", "ue_getname_xor", {"sample_path": "{{sample_path}}"}, 1660, 220),
+                _node("ue_reflection", "反射结构与字段偏移候选", "ue_reflection", {"sample_path": "{{sample_path}}"}, 1940, 40),
+                _node("ue_protection", "壳与保护信号矩阵", "ue_protection", {"sample_path": "{{sample_path}}"}, 2220, 40),
+                _node("cond_encryption", "是否需要解密证据", "condition", {}, 2500, 40),
+                _node("ue_encryption", "加密/解密状态与校验计划", "ue_encryption", {"sample_path": "{{sample_path}}"}, 2780, 0),
+                _node("ue_runtime_validation", "静态边界与运行时验证清单", "ue_runtime_validation", {"sample_path": "{{sample_path}}"}, 3060, 0),
+                _node("ue_ai_assist", "UE AI 辅助(三大件精确地址/GetName/解密算法)", "ue_ai_assist", {"sample_path": "{{sample_path}}"}, 3340, 260),
+                _node("report", "UE 结构化证据报告", "ue_report", {"title": "UE 专项分析报告", "sample_path": "{{sample_path}}"}, 3620, 120),
+                _node("delivery_gate", "UE 报告文件最终交付门禁", "ue_delivery_gate", {}, 3900, 120),
+                _node("delivery_complete", "UE 报告交付完成", "end", {}, 4180, 120),
             ],
             [
-                _edge("e1", "pe_identify", "ue_analyze"),
-                _edge("e2", "ue_analyze", "report"),
+                _edge("ue_e1", "pe_identify", "strings"),
+                _edge("ue_e2", "pe_identify", "ue_version"),
+                _edge("ue_e3", "strings", "report"),
+                _edge("ue_e4", "ue_version", "ue_static_evidence"),
+                _edge("ue_e4b", "ue_static_evidence", "ue_globals"),
+                _edge("ue_e5", "ue_globals", "ue_fname"),
+                _edge("ue_e6", "ue_fname", "ue_getname_xor"),
+                _edge("ue_e6b", "ue_getname_xor", "ue_reflection"),
+                _edge("ue_e7", "ue_reflection", "ue_protection"),
+                _edge("ue_e8", "ue_protection", "cond_encryption"),
+                _edge("ue_e9", "cond_encryption", "ue_encryption", condition="{{ue_protection.needs_decryption}} == true"),
+                _edge("ue_e10", "cond_encryption", "ue_runtime_validation", is_default=True),
+                _edge("ue_e11", "ue_encryption", "ue_runtime_validation"),
+                _edge("ue_e12", "ue_runtime_validation", "ue_ai_assist"),
+                _edge("ue_e12b", "ue_ai_assist", "report"),
+                _edge("ue_e13", "report", "delivery_gate"),
+                _edge("ue_e14", "delivery_gate", "delivery_complete"),
             ],
-            [{"key": "sample_path", "name": "dump 后的 exe 路径", "type": "text", "default": "", "required": True,
-              "source_type": "input"}],
+            [
+                {"key": "sample_path", "name": "Dump 后的 EXE 路径", "type": "text", "default": "", "required": True, "source_type": "input"},
+                {"key": "ue_version", "name": "UE 版本(留空自动识别)", "type": "text", "default": "", "required": False, "source_type": "input"},
+            ],
         )
 
-        # --- Unity 引擎专项 ---
-        add("unity-special", "Unity 引擎专项:目录扫描→版本/构建类型→程序集→解密→SDK dump→报告",
+        upsert(
+            "unity-special",
+            "Unity 专项:识别→候选/分片→Loader→恢复→结构验证→SDK→报告→严格交付门禁",
             [
-                _node("unity_analyze", "Unity 引擎分析", "unity_analyze", {"target_path": "{{target_path}}"}, 0, 0),
-                _node("sdk_dump", "SDK Dump", "sdk_dump", {"target_path": ""}, 320, 0),
-                _node("report", "Unity 专项报告", "report", {"title": "Unity 分析报告"}, 640, 0),
+                _node("unity_scan", "Unity 目录、版本与构建识别", "unity_scan", {"target_path": "{{target_path}}", "version": "{{unity_version}}"}, 0, 100),
+                _node("unity_assembly", "程序集与关键文件定位", "unity_assembly", {"target_path": "{{unity_scan.target_path}}", "version": "{{unity_version}}"}, 300, 100),
+                _node("cond_il2cpp", "是否为 IL2CPP", "condition", {}, 620, 100),
+                _node("metadata_candidates", "Metadata 候选、分片与保护形态", "unity_metadata_candidates", {"target_path": "{{unity_assembly.target_path}}"}, 900, 0),
+                _node("loader_analysis", "Loader、解密模块与恢复策略", "unity_loader_analysis", {"target_path": "{{unity_assembly.target_path}}"}, 1200, 0),
+                _node("unity_metadata", "Metadata 静态恢复/必要时运行时采集", "unity_metadata", {"target_path": "{{unity_assembly.target_path}}", "version": "{{unity_version}}"}, 1500, 0),
+                _node("metadata_validation", "Header、表边界与重复哈希验证", "unity_metadata_validation", {"target_path": "{{unity_metadata.target_path}}"}, 1800, 0),
+                _node("cond_metadata_ready", "Metadata 是否已验证", "condition", {}, 2100, 0),
+                _node("sdk_dump", "IL2CPP SDK 交付(Dump.cs / DLL / JSON / C++)", "sdk_dump", {"target_path": "{{unity_metadata.target_path}}"}, 2400, -80),
+                _node("ai_review", "AI 辅助解读(构建/SDK/剩余风险)", "ai_analyze", {
+                    "system_prompt": "你是资深 Unity/IL2CPP 逆向工程师,基于给定的静态分析数据输出中文结论。",
+                    "prompt": "综合分析以下 Unity 构建分析数据:\n1. 构建类型与版本结论\n2. Metadata 状态与 SDK 可用性\n3. 剩余风险与下一步建议\n\n扫描与识别:\n{{unity_scan}}\n\n程序集:\n{{unity_assembly}}\n\nMetadata:\n{{unity_metadata}}\n\n验证:\n{{metadata_validation}}\n\nSDK:\n{{sdk_dump}}",
+                    "output_mode": "json", "on_fail": "skip",
+                }, 2700, -220),
+                _node("report", "Unity 结构化证据报告与根目录 Markdown", "unity_report", {"title": "Unity 专项分析报告", "target_path": "{{target_path}}"}, 3000, 80),
+                _node("delivery_gate", "Metadata + SDK + DLL + Markdown 最终门禁", "unity_delivery_gate", {}, 3300, 80),
+                _node("delivery_complete", "Unity 交付完成", "end", {}, 3600, 80),
             ],
             [
-                _edge("e1", "unity_analyze", "sdk_dump"),
-                _edge("e2", "sdk_dump", "report"),
+                _edge("unity_e1", "unity_scan", "unity_assembly"),
+                _edge("unity_e2", "unity_assembly", "cond_il2cpp"),
+                _edge("unity_e3", "cond_il2cpp", "metadata_candidates", condition="{{unity_assembly.build_type}} == \"IL2CPP\""),
+                _edge("unity_e4", "cond_il2cpp", "report", is_default=True),
+                _edge("unity_e5", "metadata_candidates", "loader_analysis"),
+                _edge("unity_e5b", "loader_analysis", "unity_metadata"),
+                _edge("unity_e5c", "unity_metadata", "metadata_validation"),
+                _edge("unity_e5d", "metadata_validation", "cond_metadata_ready"),
+                _edge("unity_e6", "cond_metadata_ready", "sdk_dump", condition="{{metadata_validation.metadata_verified}} == true"),
+                _edge("unity_e7", "cond_metadata_ready", "ai_review", is_default=True),
+                _edge("unity_e8", "sdk_dump", "ai_review"),
+                _edge("unity_e8b", "ai_review", "report"),
+                _edge("unity_e9", "report", "delivery_gate"),
+                _edge("unity_e10", "delivery_gate", "delivery_complete"),
             ],
-            [{"key": "target_path", "name": "游戏文件夹路径", "type": "text", "default": "", "required": True,
-              "source_type": "input"}],
+            [
+                {"key": "target_path", "name": "游戏文件夹路径", "type": "text", "default": "", "required": True, "source_type": "input"},
+                {"key": "unity_version", "name": "Unity 版本(留空自动识别)", "type": "text", "default": "", "required": False, "source_type": "input"},
+            ],
         )
         db.commit()
     finally:

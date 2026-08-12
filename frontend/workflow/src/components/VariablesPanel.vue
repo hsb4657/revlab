@@ -42,7 +42,10 @@ function delVar(i) {
           </td>
           <td><input type="checkbox" v-model="v.required" /></td>
           <td>
-            <input v-if="v.source_type === 'input'" v-model="store.runtimeVals[v.key]" placeholder="运行前填入" class="mono" />
+            <span v-if="store.contextSampleId && v.key === 'sample_path'" class="injected-value">
+              自动使用样本 #{{ store.contextSampleId }}
+            </span>
+            <input v-else-if="v.source_type === 'input'" v-model="store.runtimeVals[v.key]" placeholder="运行前填入" class="mono" />
             <span v-else class="muted small">—</span>
           </td>
           <td><button class="small danger" @click="delVar(i)" title="删除">✕</button></td>

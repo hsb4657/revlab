@@ -1,0 +1,9 @@
+.logopen /u D:\gongju\revlab\work\unity_recovery\gunfire_loader_trace.log
+.echo REVLAB_TRACE_START
+sxe ld:winmm.dll
+sxe ld:Custom.dll
+sxe ld:GameAssembly.dll
+bu kernelbase!CreateFileW ".echo CREATE_FILE_W; du @rcx; gu; .printf \"HANDLE=%p\\n\", @rax; g"
+bu kernelbase!ReadFile ".printf \"READ_FILE h=%p buffer=%p length=%x\\n\", @rcx, @rdx, @r8d; g"
+bu kernelbase!VirtualProtect ".printf \"VIRTUAL_PROTECT base=%p size=%p protect=%x\\n\", @rcx, @rdx, @r8d; g"
+g

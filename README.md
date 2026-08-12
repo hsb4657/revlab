@@ -2,7 +2,7 @@
 
 > 面向 Windows PE 文件的全自动深度逆向分析平台(实验室合规测试用途)
 
-REVLab 是一个针对 Windows PE 文件的可视化逆向工程工作流平台,覆盖**静态分析 → 壳检测 → 脱壳 → 反汇编 → 反编译 → 动态沙箱 → 网络抓包 → 聚合报告**的全流程,支持**自定义工作流编排**,并内置 **MCP Server** 可接入 Codex / Claude Code / Cursor 等 AI 智能体,以及 **OpenAI 兼容 AI 模型**用于智能报告解读与分析问答。
+REVLab 是一个针对 Windows PE、UE 与 Unity 样本的可视化分析工作台,覆盖**静态分析 → 壳检测 → 脱壳 → 反汇编 → 反编译 → 动态沙箱 → 网络抓包 → 聚合报告**的全流程。所有主要操作都在主站 `http://127.0.0.1:8000/` 内完成:内嵌图工作流画布、实时节点状态、产物中心、AI 对话和模型设置共享同一入口。平台支持**无限自定义工作流与节点组合**,并内置 **MCP Server** 可接入 Codex / Claude Code / Cursor 等 AI 智能体。
 
 > ⚠️ **免责声明(重要,请务必阅读)**
 >
@@ -29,9 +29,10 @@ REVLab 是一个针对 Windows PE 文件的可视化逆向工程工作流平台,
 ### 工作流② UE 虚幻引擎专项(独立)
 - 🎮 输入 dump 后的 exe,自动/手动识别引擎版本(知识库 4.27 / 5.0~5.5)
 - 📥 源码轻量拉取:按版本在 GitHub 镜像定位分支,raw 拉取少量关键头文件(几 KB,本地缓存,不克隆大仓库)
-- 🗿 **三大件定位**:GNames / GObjects / GWorld / GEngine(特征字节签名扫描 12+ 内置 + 自定义签名 + 源码结构交叉校验)
-- 🔍 **反射系统分析**:UObject/UClass/UFunction/FProperty 反射结构检测、混淆判定、运行时遍历方案
-- 🔐 加密解密:先检测 FName/AES/高熵/壳;**未检测到加密则跳过解密**,检测到才输出 FNamePool 等解密方案
+- 🗿 **三大件定位**:GNames / GObjects / GWorld / GEngine(特征字节签名扫描 + 地址、置信度、静态证据、运行时复核清单)
+- 🏷️ **FName / GNames 算法候选**:FNamePool 与直数组模型、分块索引/条目头/宽字符/长度位的候选公式和验证状态
+- 🔍 **反射系统分析**:UObject / UClass / UFunction / FProperty 反射结构、字段偏移、布局候选、混淆判定和运行时遍历计划
+- 🔐 保护与解密证据:先检测壳、节熵、加密线索与 FName 线索;输出明确的 `confirmed` / `candidate` / `unconfirmed` 状态，不把静态候选伪装成已验证地址
 - 📄 UE 专项报告(HTML/MD/JSON)
 
 ### 工作流③ Unity 引擎专项(独立)
@@ -39,13 +40,15 @@ REVLab 是一个针对 Windows PE 文件的可视化逆向工程工作流平台,
 - 🏗️ 目录扫描 / 版本识别(globalgamemanagers / UnityPlayer.dll / 版本串)/ 构建类型判定(Mono / IL2CPP)
 - 📦 **DLL 程序集分析**:Data/Managed 各 dll(dnfile 解析命名空间/类型/方法,含 Assembly-CSharp.dll 等)+ GameAssembly.dll 分析
 - 🧬 **IL2CPP metadata 分析**:global-metadata.dat(magic 0xFAB11BAF、版本、字符串表)
-- 🔐 **Metadata 自动解密**:魔数恢复 / 常见 XOR / 内存 dump 辅助;检测到加密才解密,未加密直接解析
-- 🛠️ **SDK Dump**(对齐 Il2CppDumper):生成 `Dump.cs` + `script.json` + C++ 头文件(`sdk_cpp/`)+ `sdk.json`
+- 🔐 **Metadata 状态与恢复**:区分 `plain`、`decrypted`、`header_repaired`、损坏/未知;XOR 等真实恢复必须通过二次结构校验，单纯头部修复不会被标为解密
+- 🛠️ **SDK Dump**(对齐 Il2CppDumper):仅在已验证的明文或真实解密 Metadata 上生成 `Dump.cs` + `script.json` + C++ 头文件(`sdk_cpp/`)+ `sdk.json` + 输入 DLL/Metadata + manifest
 - 🎨 资源分析(UnityFS/UnityRaw/UnityWeb)+ 关键 API 字符串 + Unity 专项报告
 
 ### 通用能力
-- 🗺️ **图化工作流 v3**(Vue Flow 画布):节点拖拽连线、**条件分支**、**审批节点**、**失败策略**(重试/跳过/终止)、单节点重跑/跳过、变量系统({{var}} 引用)、任务历史;预置模板(PE 全自动 / UE 专项 / Unity 专项)
-- 🤖 AI 解读:接入任意 OpenAI 兼容模型,智能报告解读、逆向问答
+- 🗺️ **图化工作流 v3**(主站内嵌 Vue Flow 画布):节点拖拽连线、**多条件分支**、**审批节点**、**失败策略**(重试/跳过/终止)、单节点重跑/跳过、变量系统({{var}} 引用)、任务历史;预置模板(PE 全自动 / UE 专项 / Unity 专项)
+- 🤖 **AI 辅助分析节点**:通用 `ai_analyze` 节点可拖入任意工作流(引用 {{变量}} 让 AI 分析前序结果,支持文本/JSON 输出);UE 专项 `ue_ai_assist` 节点综合静态证据与反汇编片段,由 AI 判定**三大件精确地址(RVA+绝对VA)、GetName/FName 算法、解密算法**并写入报告;内置三大模板均已接入 AI 节点,AI 未配置时自动跳过不影响流程
+- 🤖 **AI 工作台**:多会话持久化、新建/重命名/删除、上下文压缩、会话级模型与思考强度;可根据自然语言生成可编辑、可校验的 PE / UE / Unity 工作流草稿
+- 🧠 **模型预设**:OpenAI、DeepSeek、通义、智谱、Kimi、SiliconFlow、Gemini、OpenRouter、Groq、Together、Mistral、Perplexity、Azure OpenAI、Anthropic 兼容代理、Ollama、LM Studio
 - 🔌 MCP Server:23+ 分析工具,一键接入 Codex / Claude Code / Cursor / 自定义智能体
 - 📂 **输出目录可配置**:报告/抓包/脱壳产物/SDK 可指定输出根目录(设置页)
 - 📄 聚合报告:JSON / HTML / Markdown 多维报告
@@ -71,15 +74,30 @@ REVLab 是一个针对 Windows PE 文件的可视化逆向工程工作流平台,
 
 ### 安装与启动
 
-```bat
-cd revlab
-python -m pip install -r backend\requirements.txt
+首次克隆后执行一键配置。它会创建项目专用 `.venv`、安装后端和 MCP 依赖、构建内嵌工作流编辑器，并在启动前输出 Python / Node / Ghidra / UPX / PE-sieve 的状态：
 
-:: 启动后端 + MCP(首次会自动初始化数据库与默认工作流)
+```powershell
+cd revlab
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+```
+
+完整环境（自动补齐缺失的 Python、Node.js、Java 21，下载 Ghidra 与可选 PE 工具，并运行验证）使用：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -All -PersistEnv
+```
+
+`-All` 包含较大的 Ghidra 下载；只需要反编译能力时也可稍后单独执行 `-InstallGhidra -PersistEnv`。详细选项和离线/排错说明见 [docs/SETUP.md](docs/SETUP.md)。
+
+配置完成后启动后端与 MCP：
+
+```bat
 scripts\start.bat
 ```
 
 打开浏览器访问 **http://127.0.0.1:8000**
+
+项目按 MIT 许可证开源；本地构建、测试和贡献约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ### 使用流程
 
@@ -113,31 +131,34 @@ python samples\make_sample.py samples\revlab_sample.exe
 ### 下载外部工具(可选)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\download_tools.ps1 -SkipGhidra   # UPX + PE-sieve
-powershell -ExecutionPolicy Bypass -File scripts\download_tools.ps1               # 含 Ghidra(~500MB)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -InstallTools
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -InstallGhidra -PersistEnv
 ```
 
 ## 自定义工作流
 
-### 图化工作流画布 v3(推荐,浏览器打开 **http://127.0.0.1:8000/wf/**)
+### 图化工作流画布 v3(推荐:主站「工作流」页)
 参考 **DeterminFlow / n8n / Temporal / Airflow / LangGraph** 设计的图化引擎:
 
-- **节点拖拽连线**:分析节点(PE识别/壳检测/脱壳/反汇编/字符串/UE分析/Unity分析/SDK dump)+ 控制节点(条件分支/审批/脚本/报告)
+- **节点拖拽连线**:分析节点(PE识别/壳检测/脱壳/反汇编/字符串/UE分析/Unity分析/SDK dump)+ 控制节点(条件分支/审批/脚本/报告)+ **AI 辅助节点**(通用 `ai_analyze`、UE 专项 `ue_ai_assist`)
 - **条件分支**:如「{{packer_detect.packed}} == true」→ 脱壳,否则走默认分支
 - **审批节点**:运行样本等危险操作前人工确认,可驳回
 - **失败策略**:每节点 `on_fail`(abort/skip/retry)+ `retry_count`
 - **变量系统**:节点输出写入变量池,参数用 `{{var}}` 引用;支持 `AND/OR/NOT` 与比较运算
 - **执行控制**:单节点重跑 / 跳过 / 停止任务,节点状态实时着色
-- **预置模板**:`pe-auto`(识别→壳检测→条件脱壳→反汇编→报告)、`ue-special`、`unity-special`
+- **预置模板**:`pe-auto`(识别→壳检测→条件脱壳→反汇编→报告)、`ue-special`、`unity-special`; 三者可在主站中一键切换
+- **自由扩展**:从节点库创建任意数量的工作流，添加多个条件分支、变量、审批、脚本、命令和报告节点；AI 草稿载入后仍可在同一画布继续编辑
 
 ### 线性工作流(兼容,原「工作流」页)
 - 阶段启停/排序/参数,流水线实时可视化,断点续跑
 
 ## AI 模型接入
 
-「AI 模型」页面配置任意 **OpenAI 兼容**接口(Base URL / API Key / Model / Temperature),支持:
-- 智能解读当前样本(基于全量分析上下文生成中文逆向报告)
-- 逆向分析问答
+「AI 模型」页面与「对话」页面分开管理。模型设置支持厂商预设和任意 **OpenAI 兼容**接口(Base URL / API Key / Model / Temperature); 对话页面支持:
+- 多会话历史、新建、重命名、删除和上下文压缩
+- 会话级模型选择与快速 / 平衡 / 深度三档思考强度
+- 智能解读当前样本(基于可用分析上下文生成报告)、分析问答和生成可编辑工作流草稿
+- **工作流内 AI 辅助**:在「工作流」画布拖入「AI 分析节点」或「UE AI 辅助分析」节点,引用前序节点输出(如 `{{packer_detect}}`),让模型辅助判定结论;UE 模板已内置 AI 节点用于判定三大件精确地址、GetName 与解密算法(未配置模型时节点自动跳过)
 
 ## MCP 智能体接入
 

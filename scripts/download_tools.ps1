@@ -1,59 +1,90 @@
-# REVLab 外部工具下载脚本(UPX / pe-sieve / Ghidra)
-# 用法: powershell -ExecutionPolicy Bypass -File scripts\download_tools.ps1 [-SkipGhidra]
+[CmdletBinding()]
 param(
-    [switch]$SkipGhidra
+    [switch]$SkipGhidra,
+    [switch]$SkipUPX,
+    [switch]$SkipPESieve
 )
+
+# Official tool bootstrap. This script is ASCII-only for Windows PowerShell 5.1.
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $PSScriptRoot
+$root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $tools = Join-Path $root "tools"
-New-Item -ItemType Directory -Force -Path $tools | Out-Null
+$downloads = Join-Path $tools "downloads"
+New-Item -ItemType Directory -Force -Path $tools, $downloads | Out-Null
 
-function Get-File {
-    param($Url, $Out)
-    Write-Host "下载: $Url"
-    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-        & curl.exe -L -o $Out $Url 2>$null
-    } else {
-        Invoke-WebRequest -Uri $Url -OutFile $Out
+function Get-VerifiedFile {
+    param(
+        [string]$Url,
+        [string]$Destination,
+        [string]$Sha256 = ""
+    )
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        Write-Host "[STEP] Downloading $Url"
+        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
     }
-    if (-not (Test-Path $Out)) { throw "下载失败: $Url" }
-    Write-Host "  -> $Out"
+    if ($Sha256) {
+        $actual = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $Sha256.ToLowerInvariant()) {
+            throw "SHA256 mismatch for ${Destination}: $actual"
+        }
+    }
 }
 
-# ---------- UPX ----------
-$upxVer = "4.2.4"
-$upxZip = Join-Path $tools "upx-$upxVer-win64.zip"
-$upxDir = Join-Path $tools "upx"
-if (-not (Test-Path (Join-Path $upxDir "upx.exe"))) {
-    Get-File "https://github.com/upx/upx/releases/download/v$upxVer/upx-$upxVer-win64.zip" $upxZip
-    Expand-Archive -Force $upxZip (Join-Path $tools "upx_tmp")
-    New-Item -ItemType Directory -Force -Path $upxDir | Out-Null
-    Copy-Item (Join-Path $tools "upx_tmp\*\upx.exe") $upxDir -Force
-    Remove-Item -Recurse -Force (Join-Path $tools "upx_tmp")
-    Write-Host "[OK] UPX -> $upxDir\upx.exe"
-} else { Write-Host "[SKIP] UPX 已存在" }
+function Copy-FirstMatch {
+    param(
+        [string]$Root,
+        [string]$Filter,
+        [string]$Destination
+    )
+    $match = Get-ChildItem -LiteralPath $Root -Recurse -File -Filter $Filter |
+        Select-Object -First 1
+    if (-not $match) { throw "Expected file not found after extraction: $Filter" }
+    Copy-Item -LiteralPath $match.FullName -Destination $Destination -Force
+}
 
-# ---------- pe-sieve ----------
-$psVer = "0.3.11"
-$psDir = Join-Path $tools "pe-sieve"
-if (-not (Test-Path (Join-Path $psDir "pe-sieve64.exe"))) {
-    New-Item -ItemType Directory -Force -Path $psDir | Out-Null
-    Get-File "https://github.com/hasherezade/pe-sieve/releases/download/v$psVer/pe-sieve64.exe" (Join-Path $psDir "pe-sieve64.exe")
-    Write-Host "[OK] pe-sieve -> $psDir\pe-sieve64.exe"
-} else { Write-Host "[SKIP] pe-sieve 已存在" }
+if (-not $SkipUPX) {
+    $upxVersion = "4.2.4"
+    $upxDir = Join-Path $tools "upx"
+    $upxExe = Join-Path $upxDir "upx.exe"
+    if (Test-Path -LiteralPath $upxExe) {
+        Write-Host "[OK] UPX available -> $upxExe"
+    } else {
+        $upxZip = Join-Path $downloads "upx-$upxVersion-win64.zip"
+        $upxStage = Join-Path $downloads "upx-stage"
+        Get-VerifiedFile -Url "https://github.com/upx/upx/releases/download/v$upxVersion/upx-$upxVersion-win64.zip" -Destination $upxZip
+        if (Test-Path -LiteralPath $upxStage) { Remove-Item -LiteralPath $upxStage -Recurse -Force }
+        Expand-Archive -LiteralPath $upxZip -DestinationPath $upxStage -Force
+        New-Item -ItemType Directory -Force -Path $upxDir | Out-Null
+        Copy-FirstMatch -Root $upxStage -Filter "upx.exe" -Destination $upxExe
+        Write-Host "[OK] UPX installed -> $upxExe"
+    }
+}
 
-# ---------- Ghidra ----------
+if (-not $SkipPESieve) {
+    # v0.4.1 is the current stable Windows x64 release. The SHA-256 is pinned
+    # to the official archive so a failed or altered download is rejected.
+    $peSieveVersion = "0.4.1"
+    $peSieveSha256 = "792d1c9ab61dacedf2e2ec2d31e115c519c529ae8353a7c0ef6d00e01db0226e"
+    $peSieveDir = Join-Path $tools "pe-sieve"
+    $peSieveExe = Join-Path $peSieveDir "pe-sieve64.exe"
+    if (Test-Path -LiteralPath $peSieveExe) {
+        Write-Host "[OK] PE-sieve available -> $peSieveExe"
+    } else {
+        $peSieveZip = Join-Path $downloads "pe-sieve64-v$peSieveVersion.zip"
+        $peSieveStage = Join-Path $downloads "pe-sieve-stage"
+        Get-VerifiedFile -Url "https://github.com/hasherezade/pe-sieve/releases/download/v$peSieveVersion/pe-sieve64.zip" -Destination $peSieveZip -Sha256 $peSieveSha256
+        if (Test-Path -LiteralPath $peSieveStage) { Remove-Item -LiteralPath $peSieveStage -Recurse -Force }
+        Expand-Archive -LiteralPath $peSieveZip -DestinationPath $peSieveStage -Force
+        New-Item -ItemType Directory -Force -Path $peSieveDir | Out-Null
+        Copy-FirstMatch -Root $peSieveStage -Filter "pe-sieve.exe" -Destination $peSieveExe
+        Write-Host "[OK] PE-sieve installed -> $peSieveExe"
+    }
+}
+
 if (-not $SkipGhidra) {
-    $ghidraVer = "11.1.2"
-    $ghidraZip = Join-Path $tools "ghidra.zip"
-    $ghidraHome = Join-Path $root "ghidra\ghidra_$($ghidraVer)_PUBLIC"
-    if (-not (Test-Path (Join-Path $ghidraHome "support\analyzeHeadless.bat"))) {
-        Write-Host "下载 Ghidra $ghidraVer (~500MB),可能需要较长时间..."
-        Get-File "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${ghidraVer}_build/ghidra_${ghidraVer}_PUBLIC_20241119.zip" $ghidraZip
-        Expand-Archive -Force $ghidraZip (Join-Path $root "ghidra")
-        Write-Host "[OK] Ghidra -> $ghidraHome"
-    } else { Write-Host "[SKIP] Ghidra 已存在" }
+    $installer = Join-Path $PSScriptRoot "install-ghidra.ps1"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+    if ($LASTEXITCODE -ne 0) { throw "Ghidra installer failed with code $LASTEXITCODE" }
 }
 
-Write-Host ""
-Write-Host "完成。可启动: scripts\start.bat"
+Write-Host "[OK] Tool bootstrap completed"

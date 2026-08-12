@@ -5,7 +5,7 @@
   execute_stage(stage, ctx, result) -> dict  # 执行单阶段,返回要并入 result 的 dict
   describe(analysis) -> dict                 # 生成 summary(可选)
 ctx = {"params": {...}, "target_path": str, "sample_path": str|None, "data": bytes|None,
-       "analysis_id": int, "workdir": Path}
+       "analysis_id": int, "workdir": Path, "output_dir": Path}
 """
 from __future__ import annotations
 import copy
@@ -116,10 +116,16 @@ class EngineRunner:
         if sample_path and Path(sample_path).exists():
             data = Path(sample_path).read_bytes()
 
+        # Create the durable run layout before the first stage.  Engine
+        # services receive it explicitly so report/SDK/decryption outputs do
+        # not leak into global reports/ or sdk/ folders.
+        from .artifacts import engine_output_directory
+        output_dir = engine_output_directory(self.engine, self.analysis_id)
         ctx = {"params": params, "target_path": target_path,
                "sample_path": sample_path, "data": data,
                "analysis_id": self.analysis_id,
-               "workdir": Path(target_path) if target_path else None}
+               "workdir": Path(target_path) if target_path else None,
+               "output_dir": output_dir}
         result = {"_params": params}
 
         self._mark("running", "")
@@ -164,6 +170,12 @@ class EngineRunner:
             log.exception("engine %s failed", self.engine)
             self._mark("error", "", error=f"{e}\n{traceback.format_exc()}")
             return {"ok": False, "error": str(e)}
+        finally:
+            try:
+                from .artifacts import finalize_engine_artifacts
+                finalize_engine_artifacts(self.analysis_id)
+            except Exception:
+                log.exception("could not finalize artifact manifest for engine analysis %s", self.analysis_id)
 
     def _mark(self, status: str, stage: str, error: str = ""):
         _save(self.analysis_id, status=status, stage=stage, error=error)
@@ -174,6 +186,9 @@ class EngineRunner:
             a = db.query(EngineAnalysis).filter(EngineAnalysis.id == self.analysis_id).first()
             if a:
                 a.result = copy.deepcopy(result)
+                report_paths = ((result.get("report") or {}).get("report_paths") or {})
+                if report_paths:
+                    a.report_paths = copy.deepcopy(report_paths)
                 db.commit()
         finally:
             db.close()

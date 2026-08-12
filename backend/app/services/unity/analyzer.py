@@ -2,6 +2,7 @@
 供 unity/__init__.py 各阶段复用,也可独立使用。
 """
 from __future__ import annotations
+import re
 from pathlib import Path
 
 from .. import pe_parser
@@ -17,6 +18,62 @@ _RESOURCE_MAGICS = [
 ]
 
 _KEY_FILE_KINDS = ("gameassembly", "metadata", "managed", "globalgame", "player", "assets")
+
+_GAMEASSEMBLY_METADATA_MARKERS = (
+    b"global-metadata.dat",
+    b"global-metadata",
+    b"il2cpp::vm::MetadataLoader",
+    b"MetadataLoader",
+    b"MetadataCache::Initialize",
+    b"il2cpp::vm::MetadataCache",
+    b"GetMetadataVersion",
+    b"LoadMetadataFile",
+    b"il2cpp_init",
+)
+
+
+def _gameassembly_metadata_hints(path: Path) -> dict:
+    """Extract bounded, static-only metadata-loader evidence from GameAssembly.
+
+    Absence of a marker is not evidence that a custom loader does not exist:
+    production IL2CPP binaries may strip strings and symbols.  The result is
+    therefore used to guide a runtime trace, never to claim a decryption key.
+    """
+    out = {
+        "path": str(path),
+        "readable": False,
+        "marker_hits": [],
+        "api_hits": [],
+        "standard_metadata_path_found": False,
+        "loader_signal": "none",
+        "limitations": [
+            "Static string evidence cannot prove the active metadata loader or decryption algorithm.",
+            "A stripped GameAssembly may omit all loader strings; runtime tracing is required for encrypted candidates.",
+        ],
+    }
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        out["error"] = str(exc)
+        return out
+    out["readable"] = True
+    for marker in _GAMEASSEMBLY_METADATA_MARKERS:
+        positions = [match.start() for match in re.finditer(re.escape(marker), data, re.IGNORECASE)]
+        if not positions:
+            continue
+        label = marker.decode("ascii", errors="replace")
+        item = {"marker": label, "count": len(positions), "offsets": positions[:8]}
+        if marker.lower().startswith(b"il2cpp_"):
+            out["api_hits"].append(item)
+        else:
+            out["marker_hits"].append(item)
+        if marker.lower() in (b"global-metadata.dat", b"global-metadata"):
+            out["standard_metadata_path_found"] = True
+    if out["standard_metadata_path_found"]:
+        out["loader_signal"] = "standard_path_string"
+    elif out["marker_hits"] or out["api_hits"]:
+        out["loader_signal"] = "il2cpp_runtime_marker_only"
+    return out
 
 
 class UnityAnalyzer:
@@ -62,7 +119,11 @@ class UnityAnalyzer:
 
     def _resolve(self, rel: str) -> str:
         p = Path(rel)
-        return str(p if p.is_absolute() else self.path / p)
+        if p.is_absolute():
+            return str(p)
+        if p.exists():
+            return str(p.resolve())
+        return str((self.path / p).resolve())
 
     def find_by_name(self, names: tuple) -> list:
         """按文件名(小写)查找绝对路径。"""
@@ -80,6 +141,11 @@ class UnityAnalyzer:
     def metadata_path(self) -> str:
         files = self.key_files("metadata")
         return self._resolve(files[0]["path"]) if files else ""
+
+    def metadata_candidates(self) -> dict:
+        """Return evidence-only renamed/encrypted Metadata candidates."""
+        self._ensure()
+        return (self.detect or {}).get("metadata_candidates", {}) or {}
 
     def managed_dir(self) -> str:
         d = self.path / "Data" / "Managed"
@@ -109,9 +175,14 @@ class UnityAnalyzer:
     def analyze_assemblies(self) -> dict:
         """按构建类型分析程序集。"""
         bt = self.build_type()
-        out = {"mode": bt}
+        self._ensure()
+        out = {
+            "mode": bt,
+            "mode_evidence": (self.detect or {}).get("build_evidence", {}),
+        }
         if bt == "IL2CPP":
             ga = self.gameassembly_path()
+            out["gameassembly_path"] = ga
             if ga and Path(ga).exists():
                 try:
                     data = Path(ga).read_bytes()
@@ -129,12 +200,27 @@ class UnityAnalyzer:
                         "il2cpp_exports": [e["name"] for e in il2cpp_exports[:40]],
                         "pdb": (pe.get("debug") or {}).get("pdb", ""),
                     }
+                    out["gameassembly_metadata_hints"] = _gameassembly_metadata_hints(Path(ga))
                 except Exception as e:
                     out["game_assembly"] = {"path": ga, "error": str(e)}
+                    out["gameassembly_metadata_hints"] = _gameassembly_metadata_hints(Path(ga))
+            else:
+                out["gameassembly_metadata_hints"] = {
+                    "path": ga,
+                    "readable": False,
+                    "marker_hits": [],
+                    "api_hits": [],
+                    "standard_metadata_path_found": False,
+                    "loader_signal": "missing",
+                    "limitations": ["GameAssembly.dll was not available for static loader-string inspection."],
+                }
             meta = self.metadata_path()
+            out["metadata_path"] = meta
+            out["metadata_candidates"] = self.metadata_candidates()
             if meta and Path(meta).exists():
                 try:
                     from . import il2cpp as _il2cpp
+                    out["metadata_status"] = _il2cpp.check_metadata_encrypted(meta)
                     out["metadata"] = _il2cpp.parse_metadata(meta)
                 except ImportError as e:
                     out["metadata"] = {"error": f"il2cpp module not ready: {e}"}
@@ -142,6 +228,7 @@ class UnityAnalyzer:
                     out["metadata"] = {"error": str(e)}
         elif bt == "Mono":
             md = self.managed_dir()
+            out["managed_dir"] = md
             if md:
                 out["managed_assemblies"] = _mono.analyze_managed_dir(md)
                 out["api_stats"] = _mono.api_usage_stats(md)
@@ -209,7 +296,9 @@ class UnityAnalyzer:
         return {
             "unity_version": d.get("unity_version", ""),
             "build_type": d.get("build_type", "Other"),
+            "build_evidence": d.get("build_evidence", {}),
             "mode": asm.get("mode", ""),
+            "metadata_status": (asm.get("metadata_status", {}) or {}).get("status", "not_applicable"),
             "types": counts["types"],
             "methods": counts["methods"],
             "fields": counts["fields"],

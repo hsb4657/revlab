@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ..core.config import config
 
-GHIDRA_SCRIPT = Path(__file__).resolve().parents[2] / "ghidra" / "scripts" / "export_decompile.py"
+GHIDRA_SCRIPT = config.GHIDRA_DIR / "scripts" / "export_decompile.java"
 
 
 def find_ghidra_home() -> str:
@@ -32,7 +32,7 @@ def decompile_with_ghidra(sample_path: str, out_json: str, timeout: int = 600) -
     """调用 analyzeHeadless 反编译全部函数,输出 JSON。"""
     home = find_ghidra_home()
     if not home:
-        return {"ok": False, "message": "Ghidra not found. Run scripts/download_ghidra.ps1"}
+        return {"ok": False, "message": "Ghidra not found. Run scripts/install-ghidra.ps1"}
     ah = Path(home) / "support" / "analyzeHeadless.bat"
     proj_dir = config.GHIDRA_DIR / "projects"
     proj_dir.mkdir(parents=True, exist_ok=True)
@@ -45,7 +45,7 @@ def decompile_with_ghidra(sample_path: str, out_json: str, timeout: int = 600) -
 
     cmd = [str(ah), str(proj_dir), proj, "-import", sample_path,
            "-scriptPath", str(Path(script).parent),
-           "-postScript", "export_decompile.py", out_json,
+            "-postScript", "export_decompile.java", out_json,
            "-scriptlog", str(log), "-overwrite"]
     try:
         p = subprocess.run(cmd, capture_output=True, timeout=timeout)

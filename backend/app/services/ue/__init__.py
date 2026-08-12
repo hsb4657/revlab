@@ -22,13 +22,14 @@ from . import signatures as _signatures
 from . import source_fetcher as _source_fetcher
 from . import versions as _versions
 
-STAGES = ["version", "source", "majors", "reflection", "encryption", "report"]
+STAGES = ["version", "source", "majors", "reflection", "encryption", "ai", "report"]
 TITLES = {
     "version": "版本识别",
     "source": "源码轻量拉取",
     "majors": "三大件定位",
     "reflection": "反射系统分析",
     "encryption": "加密解密",
+    "ai": "AI 辅助分析",
     "report": "报告生成",
 }
 
@@ -55,6 +56,7 @@ def execute_stage(stage: str, ctx: dict, result: dict) -> dict:
         "majors": _stage_majors,
         "reflection": _stage_reflection,
         "encryption": _stage_encryption,
+        "ai": _stage_ai,
         "report": _stage_report,
     }.get(stage)
     if fn is None:
@@ -247,6 +249,37 @@ def _decryption_plan(version: str, fname: str, three_majors: dict) -> list:
     return steps
 
 
+# ---------------------------------------------------------------- 阶段:AI 辅助分析
+def _stage_ai(ctx: dict, result: dict) -> dict:
+    """AI 辅助:综合静态证据(候选地址+反汇编)给出三大件精确地址、GetName/FName
+    算法与解密算法。AI 未配置时跳过,不影响整体分析。"""
+    from . import ai_assist as _ai_assist
+
+    params = _get_params(ctx)
+    data = _get_data(ctx)
+    try:
+        a = _analyzer.UEAnalyzer(ctx["target_path"], data=data)
+        full = a.run()
+    except Exception as exc:
+        return {"skipped": True, "note": f"AI 辅助所需分析失败: {exc}"}
+    pe = a.pe
+    pe["data"] = data
+    try:
+        evidence = _ai_assist.build_ue_evidence(full, data, pe)
+    except Exception as exc:
+        return {"skipped": True, "note": f"AI 证据构建失败: {exc}"}
+    assisted = _ai_assist.assist_ue_analysis_safe(evidence)
+    assisted["ai_output"] = True
+    status = "done" if assisted.get("configured") and not assisted.get("error") else (
+        "skipped" if not assisted.get("configured") else "error")
+    return {
+        "status": status,
+        "ai_assist": assisted,
+        "evidence": evidence,
+        "note": "AI 辅助完成" if status == "done" else (assisted.get("error") or "AI 未配置,已跳过"),
+    }
+
+
 # ---------------------------------------------------------------- 阶段:报告生成
 def _stage_report(ctx: dict, result: dict) -> dict:
     data = _get_data(ctx)
@@ -256,8 +289,15 @@ def _stage_report(ctx: dict, result: dict) -> dict:
         "file_size": len(data),
         "sha256": _hash_svc.compute_hashes(data)["sha256"],
     }
-    rep = _report_svc.build_report(sample, {"ue": result})
-    out = config.REPORTS_DIR / "ue"
+    report_result = dict(result)
+    ai_stage = result.get("ai") or {}
+    if isinstance(ai_stage, dict) and isinstance(ai_stage.get("ai_assist"), dict):
+        report_result["ai_assist"] = ai_stage["ai_assist"]
+    rep = _report_svc.build_report(sample, {"ue": report_result})
+    output_dir = ctx.get("output_dir")
+    out = Path(output_dir) / "report" if output_dir else config.REPORTS_DIR / "ue"
     out.mkdir(parents=True, exist_ok=True)
-    paths = _report_svc.save_report(rep, out, f"ue_{sample_name}")
+    paths = _report_svc.save_report(
+        rep, out, _report_svc.analysis_report_name(sample_name, "ue")
+    )
     return {"name": sample_name, "report_paths": paths}
