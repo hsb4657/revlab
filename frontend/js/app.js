@@ -136,8 +136,13 @@ document.querySelectorAll('.nav-btn').forEach(b => {
 /* ---------------- 系统状态 ---------------- */
 function loadStatus() {
   api.status().then(s => {
+    const dynamicState = s.dynamic_execution || {};
+    const dynamicCaps = dynamicState.capabilities || {};
+    const backends = dynamicCaps.backends || {};
     const tags = [
       ['Ghidra', s.ghidra], ['UPX', s.upx], ['PE-sieve', s.pe_sieve],
+      ['Sandboxie', backends.sandboxie?.available],
+      ['Windows Sandbox', backends.windows_sandbox?.available],
       ['VMware', s.vmware], ['pktmon', true]
     ].map(([n, ok]) => `<span class="pkt">${n} ${ok ? '✓' : '✗'}</span>`).join('');
     $('#sys-status').innerHTML = `沙箱:${s.sandbox_mode} ${tags}`;
@@ -145,12 +150,14 @@ function loadStatus() {
     const envMeta = $('#overview-environment-meta');
     const dynamic = $('#overview-dynamic-policy');
     const dynamicMeta = $('#overview-dynamic-meta');
-    const dynamicState = s.dynamic_execution || {};
-    const vmReady = dynamicState.mode === 'vmware' && dynamicState.allowed;
+    const labels = {
+      sandboxie: '轻量隔离', windows_sandbox: 'Windows Sandbox',
+      vmware: 'VMware（手动）', host: '宿主机', blocked: '未执行'
+    };
     if (env) env.textContent = s.environment_ready ? '已就绪' : '待配置';
     if (envMeta) envMeta.textContent = s.environment_ready ? '核心分析能力可用' : `缺少 ${(s.environment_missing || []).length} 项能力`;
-    if (dynamic) dynamic.textContent = vmReady ? '隔离 VM' : (dynamicState.mode === 'host' ? '宿主机' : '策略阻止');
-    if (dynamicMeta) dynamicMeta.textContent = vmReady ? '允许在快照中运行' : (dynamicState.mode === 'host' ? '已显式允许宿主机执行' : '配置 VMX 与快照后可运行');
+    if (dynamic) dynamic.textContent = labels[dynamicState.mode] || '未执行';
+    if (dynamicMeta) dynamicMeta.textContent = dynamicState.reason || dynamicCaps.message || '动态分析未运行';
   }).catch((error) => {
     $('#sys-status').textContent = '服务状态不可用';
     const env = $('#overview-environment');
@@ -477,6 +484,7 @@ async function renderWorkflowEditor() {
       const val = (st.params || {})[k];
       if (v.type === 'bool') return `<label><input type="checkbox" data-wf-param="${k}" ${val ? 'checked' : ''}>${esc(v.label)}</label>`;
       if (v.type === 'multi') return `<label>${esc(v.label)} <input type="text" data-wf-param="${k}" value="${esc((val || []).join(','))}"></label>`;
+      if (v.type === 'select') return `<label>${esc(v.label)} <select data-wf-param="${k}">${(v.options || []).map(o => `<option value="${esc(o)}" ${String(o) === String(val ?? v.default) ? 'selected' : ''}>${esc({auto: '自动选择隔离', sandboxie: 'Sandboxie-Plus（轻量）', windows_sandbox: 'Windows Sandbox', vmware: 'VMware（手动）', host: '宿主机（需确认）'}[o] || o)}</option>`).join('')}</select></label>`;
       return `<label>${esc(v.label)} <input type="number" data-wf-param="${k}" value="${esc(val ?? v.default)}" min="${v.min}" max="${v.max}"></label>`;
     }).join('');
     return `<div class="wf-stage">

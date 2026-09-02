@@ -60,11 +60,35 @@ class CaptureSessionTests(unittest.TestCase):
 
 
 class ExecutionPolicyTests(unittest.TestCase):
+    def test_auto_mode_never_selects_vmware(self):
+        with patch.object(config, "DYNAMIC_BACKEND", "auto"), \
+                patch.object(sandbox, "sandboxie_available", return_value=False), \
+                patch.object(sandbox, "windows_sandbox_available", return_value=False), \
+                patch.object(sandbox, "vm_configured", return_value=True):
+            capabilities = sandbox.sandbox_capabilities()
+        self.assertEqual(capabilities["selected"], "blocked")
+        self.assertTrue(capabilities["backends"]["vmware"]["manual_only"])
+
+    def test_sandboxie_runner_can_be_detected_without_starting_it(self):
+        fake_start = Path(tempfile.gettempdir()) / "Start.exe"
+        with patch.object(sandbox, "_sandboxie_start_path", return_value=fake_start), \
+                patch.object(sandbox.os, "name", "nt"):
+            runner = sandbox.SandboxieRunner(timeout=2)
+        self.assertEqual(runner.backend, "sandboxie")
+        self.assertEqual(runner.box_name, "REVLab")
+
     def test_host_sandbox_requires_explicit_opt_in(self):
         with patch.object(config, "USE_SANDBOX_VM", False), \
                 patch.object(config, "ALLOW_HOST_EXECUTION", False):
             with self.assertRaises(sandbox.SandboxError):
                 sandbox.create_sandbox()
+
+    def test_host_sandbox_accepts_one_shot_user_confirmation(self):
+        with patch.object(config, "USE_SANDBOX_VM", False), \
+                patch.object(config, "ALLOW_HOST_EXECUTION", False):
+            runner = sandbox.create_sandbox(mode="host", confirm_host_execution=True, timeout=1)
+        self.assertIsInstance(runner, sandbox.LocalSandbox)
+        self.assertEqual(runner.timeout, 1)
 
     def test_dynamic_node_reports_policy_block_without_running_sample(self):
         ctx = {"params": {"timeout": 1}, "pool": {}, "task_id": 7}

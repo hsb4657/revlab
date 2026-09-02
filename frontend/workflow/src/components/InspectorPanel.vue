@@ -11,6 +11,14 @@ const schema = computed(() => {
   return store.spec.node_types.find((t) => t.type === n.data.nodeType)?.params_schema || []
 })
 
+function optionLabel(value) {
+  return ({
+    auto: '自动选择隔离', sandboxie: 'Sandboxie-Plus（轻量）',
+    windows_sandbox: 'Windows Sandbox', vmware: 'VMware（手动）',
+    host: '宿主机（需确认）',
+  })[value] || value
+}
+
 watch(selectedNode, (n) => {
   if (!n) return
   const p = n.data.params
@@ -58,7 +66,7 @@ watch(selectedNode, (n) => {
             </span>
             <span v-if="f.type === 'select'">
               <select v-model="selectedNode.data.params[f.key]">
-                <option v-for="o in (f.options || [])" :key="o" :value="o">{{ o }}</option>
+                <option v-for="o in (f.options || [])" :key="o" :value="o">{{ optionLabel(o) }}</option>
               </select>
             </span>
             <span v-else-if="f.type === 'bool'">

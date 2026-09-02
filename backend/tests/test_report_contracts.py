@@ -51,6 +51,23 @@ class ReportNamingTests(unittest.TestCase):
             self.assertEqual(Path(paths["root_markdown"]).parent, run_root)
             self.assertEqual(Path(paths["root_markdown"]).name, "UAGame_dump.md")
 
+    def test_dynamic_policy_block_is_rendered_as_not_executed(self):
+        payload = report.build_report(
+            {"file_name": "sample.exe"},
+            {"dynamic": {
+                "sandbox": "blocked",
+                "executed": False,
+                "execution_status": "blocked_by_policy",
+                "message": "No isolated dynamic backend is available",
+            }},
+        )
+        html = report.to_html(payload)
+        markdown = report.to_markdown(payload)
+        self.assertIn("动态执行状态", html)
+        self.assertIn("未执行", html)
+        self.assertIn("blocked_by_policy", markdown)
+        self.assertIn("样本执行: 未执行", markdown)
+
 
 class UnityReportRenderingTests(unittest.TestCase):
     def test_dynamic_metadata_validation_is_rendered_in_html_and_markdown(self):

@@ -201,25 +201,34 @@ def decompile_ghidra(sample_id: int) -> str:
 
 # ================================================================ 动态/网络
 @mcp.tool()
-def run_dynamic(sample_id: int, timeout: int = 60) -> str:
-    """在沙箱中运行样本,监控进程/文件/注册表行为(受控环境)。"""
+def dynamic_capabilities() -> str:
+    """返回动态分析后端能力；只做探测，不启动 VM 或样本。"""
+    from app.services import sandbox
+    return _j(sandbox.sandbox_capabilities())
+
+
+@mcp.tool()
+def run_dynamic(sample_id: int, timeout: int = 60, mode: str = "auto",
+                confirm_host_execution: bool = False) -> str:
+    """短时运行样本；默认选择隔离后端，宿主机仅接受一次性明确确认。"""
     from app.services import sandbox
     s = _sample(sample_id)
-    if not config.USE_SANDBOX_VM and not config.ALLOW_HOST_EXECUTION:
-        return _j({
-            "ok": True,
-            "executed": False,
-            "execution_status": "blocked_by_policy",
-            "message": "Host execution is disabled; configure VMware or explicitly enable it in an isolated lab.",
-        })
     try:
-        sb = sandbox.create_sandbox()
+        sb = sandbox.create_sandbox(mode=mode, timeout=timeout,
+                                    confirm_host_execution=confirm_host_execution)
     except sandbox.SandboxError as exc:
         return _j({"ok": True, "executed": False,
-                   "execution_status": "blocked_by_policy", "message": str(exc)})
+                   "execution_status": "blocked_by_policy", "message": str(exc),
+                   "capabilities": sandbox.sandbox_capabilities()})
+    if isinstance(sb, sandbox.SandboxieRunner):
+        r = sb.run_and_capture(s.stored_path, str(config.CAPTURES_DIR), config.SANDBOX_RUN_ARGS, timeout)
+        return _j({**r, "executed": bool(r.get("executed")), "runner": "sandboxie"})
     if isinstance(sb, sandbox.VMSandbox):
         r = sb.run_and_capture(s.stored_path, str(config.UNPACKED_DIR), config.SANDBOX_RUN_ARGS, timeout)
         return _j({**r, "executed": bool(r.get("ok")), "runner": "vmware"})
+    if isinstance(sb, sandbox.WindowsSandbox):
+        r = sb.run_and_capture(s.stored_path, str(config.CAPTURES_DIR), config.SANDBOX_RUN_ARGS, timeout)
+        return _j({**r, "executed": bool(r.get("executed")), "runner": "windows_sandbox"})
     mon = sandbox.BehaviorMonitor(watch_dirs=[str(Path(s.stored_path).parent)])
     sb = sandbox.LocalSandbox(timeout=timeout, monitor=mon)
     result = sb.run(s.stored_path, config.SANDBOX_RUN_ARGS)

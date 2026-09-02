@@ -266,6 +266,29 @@ def _generic_ai_markdown(analysis: dict) -> list:
     return out
 
 
+def _dynamic_evidence(analysis: dict) -> dict:
+    """Normalize dynamic-run status without implying that a sample executed."""
+    dynamic = analysis.get("dynamic") or {}
+    if not isinstance(dynamic, dict):
+        return {}
+    run = dynamic.get("run") or dynamic.get("result") or {}
+    if not isinstance(run, dict):
+        run = {}
+    executed = dynamic.get("executed")
+    if executed is None:
+        executed = run.get("executed", run.get("ok", False))
+    status = dynamic.get("execution_status") or run.get("execution_status")
+    if not status:
+        status = "completed" if executed else "not_collected"
+    return {
+        "backend": dynamic.get("sandbox") or dynamic.get("runner") or dynamic.get("backend", ""),
+        "executed": bool(executed),
+        "status": status,
+        "reason": dynamic.get("message") or dynamic.get("error") or run.get("error", ""),
+        "duration": run.get("ran_seconds", dynamic.get("ran_seconds", "")),
+    }
+
+
 def to_html(report: dict) -> str:
     a = report.get("analysis", {})
     s = report.get("sample", {})
@@ -617,6 +640,19 @@ def to_html(report: dict) -> str:
                 if items:
                     body.append(f"<h3>{heading}</h3><pre>" + _esc("\n".join(str(item) for item in items)) + "</pre>")
 
+    # Dynamic status is an evidence boundary. A policy block is useful output,
+    # but must never be rendered as an observed runtime behavior.
+    dynamic = _dynamic_evidence(a)
+    if dynamic:
+        observed = "已执行" if dynamic["executed"] else "未执行"
+        body.append(_section("动态执行状态", [
+            ["执行后端", dynamic["backend"] or "未选择"],
+            ["样本执行", observed],
+            ["状态", dynamic["status"]],
+            ["运行时长(秒)", dynamic["duration"]],
+            ["说明", dynamic["reason"] or "无"],
+        ], ["字段", "值"]))
+
     # 网络
     net = a.get("network", {})
     if net:
@@ -804,6 +840,16 @@ def to_markdown(report: dict) -> str:
                 if items:
                     out.append(f"\n#### {heading}\n")
                     out.extend(f"- {item}" for item in items)
+    dynamic = _dynamic_evidence(a)
+    if dynamic:
+        out.append("\n## 动态执行状态\n")
+        out.append(f"- 执行后端: `{dynamic['backend'] or '未选择'}`")
+        out.append(f"- 样本执行: {'已执行' if dynamic['executed'] else '未执行'}")
+        out.append(f"- 状态: `{dynamic['status']}`")
+        if dynamic["duration"] != "":
+            out.append(f"- 运行时长: `{dynamic['duration']}` 秒")
+        if dynamic["reason"]:
+            out.append(f"- 说明: {dynamic['reason']}")
     net = a.get("network", {})
     if net:
         out.append("\n## 网络\n")

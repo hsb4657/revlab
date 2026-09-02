@@ -53,7 +53,14 @@ Copy-Item .env.example .env
 # 报告和运行产物的根目录。留空表示项目目录。
 REVLAB_OUTPUT_DIR=D:\revlab-output
 
-# VMware 动态分析。三个值需要和实际虚拟机一致。
+# 动态后端。auto 优先使用 Sandboxie-Plus，其次 Windows Sandbox；不会自动启动 VMware。
+REVLAB_DYNAMIC_BACKEND=auto
+
+# 可选：Sandboxie-Plus 的 Start.exe（留空自动探测）
+REVLAB_SANDBOXIE_START=
+REVLAB_SANDBOXIE_BOX=REVLab
+
+# VMware 动态分析（可选，三个值需要和实际虚拟机一致）。
 REVLAB_SANDBOX_VM=1
 REVLAB_VM_VMX=D:\Lab\revlab.vmx
 REVLAB_VM_SNAPSHOT=clean
@@ -63,7 +70,7 @@ REVLAB_VM_GUEST_PATH=C:\RevLab\sample.exe
 REVLAB_ALLOW_HOST_EXECUTION=0
 ```
 
-没有准备好快照时，不要把 `REVLAB_SANDBOX_VM` 改成 1。宿主机执行也不要用来替代快照沙箱。
+不需要虚拟机时保持默认 `auto` 即可。Sandboxie-Plus 或 Windows Sandbox 都不可用时，动态节点会明确显示“未执行”，不会自动启动 VMware。确需验证时，可手动选择已配置的 VMware；宿主机执行必须在动态节点勾选一次性确认，AI 节点不能代替这个确认。宿主机执行会使用当前用户权限、网络和文件系统，只适合专用隔离实验机。Sandboxie-Plus 可从 winget 安装：`winget install --id Sandboxie.Plus`，安装动作由用户自行确认，REVLab 不会替你安装。
 
 远程 API 还需要 `REVLAB_API_TOKEN`，允许的浏览器来源写在 `REVLAB_CORS_ORIGINS`。脚本节点和命令节点分别由 `REVLAB_ENABLE_UNSAFE_NODES` 控制。
 

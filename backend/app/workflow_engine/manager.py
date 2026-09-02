@@ -271,7 +271,8 @@ def init_builtin_templates():
                 _node("cond_dynamic", "是否需要内存转储", "condition", {}, 1320, 150),
                 _node("approval", "内存转储/动态分析确认", "approval", {"message": "确认开始内存转储或动态行为分析"}, 1580, 150),
                 _node("dynamic", "内存转储/动态行为分析", "dynamic_analyze", {
-                    "timeout": 60, "capture_network": True,
+                    "timeout": 60, "backend": "auto", "confirm_host_execution": False,
+                    "capture_network": True,
                     "capture_memory_dump": True, "dump_delay_seconds": 2,
                 }, 1840, 150),
                 _node("disassemble", "反汇编与入口分析", "disassemble", {"max_insns": 3000}, 1580, 20),

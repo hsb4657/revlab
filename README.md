@@ -48,7 +48,7 @@ AI 配置完成后，建议把对应的 AI 节点放在证据节点之后。AI �
 
 `dynamic` 阶段可以在受控环境中运行样本，收集进程树、子进程、文件变化、注册表变化和 DNS 线索；网络部分使用 Windows `pktmon` 转换为 pcap，再由项目内的解析器整理 DNS、HTTP、TLS SNI 和连接信息。
 
-默认策略是禁止执行。只有配置了有效的 VMware VMX 与快照，或者明确设置 `REVLAB_ALLOW_HOST_EXECUTION=1`，才会尝试运行。没有隔离 VM 时接口返回 `execution_status=blocked_by_policy`，这不是失败，也不是成功，而是一次没有发生的执行。抓包需要管理员权限；没有权限时样本仍可完成静态分析。
+默认策略是隔离优先且失败关闭：`REVLAB_DYNAMIC_BACKEND=auto` 会优先探测 Sandboxie-Plus，再探测 Windows Sandbox。自动模式不会启动 VMware，也不会因为找不到隔离后端而偷偷改用宿主机；两者都不可用时返回 `blocked_by_policy`。VMware 只能在节点里手动选择，宿主机执行还需要勾选“一次性允许宿主机执行”，AI 工具调用不能代替这个确认。Sandboxie-Plus 只通过 `Start.exe /box:REVLab /wait` 运行一次样本，不会自动安装或修改全局设置。
 
 ### 5. UE 和 Unity 页面
 
@@ -226,6 +226,13 @@ REVLAB_SANDBOX_VM=1
 REVLAB_VM_VMX=D:\Lab\revlab.vmx
 REVLAB_VM_SNAPSHOT=clean
 REVLAB_VM_GUEST_PATH=C:\RevLab\sample.exe
+
+# 动态后端：auto / sandboxie / windows_sandbox / vmware / host
+REVLAB_DYNAMIC_BACKEND=auto
+
+# 可选：Sandboxie-Plus Start.exe；留空时自动查找常见安装目录
+REVLAB_SANDBOXIE_START=
+REVLAB_SANDBOXIE_BOX=REVLab
 
 # 只在隔离实验机上显式打开宿主机执行
 REVLAB_ALLOW_HOST_EXECUTION=0

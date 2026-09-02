@@ -45,8 +45,9 @@ TOOL_DEFINITIONS = [
     _tool("unity_scan", "扫描当前 Unity 游戏目录、版本和 Mono/IL2CPP 构建证据。", {}, []),
     _tool("unity_analyze", "对当前 Unity 目录读取程序集、Metadata 和关键字符串证据。", {}, []),
     _tool("unity_metadata", "重新检查当前 Unity Metadata 状态和结构校验。", {}, []),
-    _tool("dynamic_run", "在现有动态执行策略下运行当前 PE；策略阻止时只返回阻止原因。", {
+    _tool("dynamic_run", "在隔离动态后端运行当前 PE；宿主机执行不对 AI 工具开放。", {
         "timeout": {"type": "integer", "minimum": 1, "maximum": 120},
+        "mode": {"type": "string", "enum": ["auto", "sandboxie", "windows_sandbox", "vmware"]},
     }),
 ]
 
@@ -145,24 +146,34 @@ def _execute_tool(name: str, args: dict, *, kind: str, target: str) -> dict:
         if name == "dynamic_run":
             from ..core.config import config
             # An AI-selected tool call is not human approval for host
-            # execution.  Agentic dynamic runs are VM-only even when the
-            # separate manual host-execution escape hatch is enabled.
-            if not config.USE_SANDBOX_VM:
+            # execution. Agentic dynamic runs can use an installed isolated
+            # runner, but never the separate manual host-execution escape hatch.
+            from . import sandbox
+            timeout = int(args.get("timeout", 60) or 60)
+            mode = str(args.get("mode") or "auto")
+            try:
+                runner = sandbox.create_sandbox(mode=mode, timeout=timeout)
+            except sandbox.SandboxError as exc:
                 return {"ok": True, "tool": name, "executed": False,
                         "execution_status": "blocked_by_policy",
-                        "reason": "AI 工具调用只允许在已配置快照的隔离 VM 中执行"}
-            from . import sandbox
-            runner = sandbox.create_sandbox()
-            timeout = int(args.get("timeout", 60) or 60)
-            if isinstance(runner, sandbox.VMSandbox):
-                out = runner.run_and_capture(target, str(config.CAPTURES_DIR), config.SANDBOX_RUN_ARGS, timeout)
-                return {"ok": bool(out.get("ok")), "tool": name, "runner": "vmware",
-                        "executed": bool(out.get("ok")),
-                        "execution_status": "completed" if out.get("ok") else "failed",
+                        "reason": str(exc), "capabilities": sandbox.sandbox_capabilities()}
+            if isinstance(runner, (sandbox.SandboxieRunner, sandbox.VMSandbox, sandbox.WindowsSandbox)):
+                if isinstance(runner, sandbox.SandboxieRunner):
+                    out = runner.run_and_capture(target, str(config.CAPTURES_DIR), config.SANDBOX_RUN_ARGS, timeout)
+                    runner_name = "sandboxie"
+                elif isinstance(runner, sandbox.WindowsSandbox):
+                    out = runner.run_and_capture(target, str(config.CAPTURES_DIR), config.SANDBOX_RUN_ARGS, timeout)
+                    runner_name = "windows_sandbox"
+                else:
+                    out = runner.run_and_capture(target, str(config.CAPTURES_DIR), config.SANDBOX_RUN_ARGS, timeout)
+                    runner_name = "vmware"
+                return {"ok": bool(out.get("ok", out.get("executed"))), "tool": name, "runner": runner_name,
+                        "executed": bool(out.get("ok", out.get("executed"))),
+                        "execution_status": out.get("execution_status") or ("completed" if out.get("ok") else "failed"),
                         "result": out}
             return {"ok": True, "tool": name, "executed": False,
                     "execution_status": "blocked_by_policy",
-                    "reason": "当前 sandbox runner 不是隔离 VMware 环境"}
+                    "reason": "当前 sandbox runner 不是受支持的隔离环境"}
         return {"ok": False, "status": "unknown_tool", "error": name}
     except Exception as exc:
         return {"ok": False, "tool": name, "status": "tool_error", "error": str(exc)[:800]}

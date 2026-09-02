@@ -177,11 +177,19 @@ class Runner:
         timeout = int(p.get("timeout", 60))
         pcap_path = str(config.CAPTURES_DIR / f"{self.sample_id}.pcap")
         net = {}
-        if not config.USE_SANDBOX_VM and not config.ALLOW_HOST_EXECUTION:
+        backend = str(p.get("backend") or "auto")
+        try:
+            sb = sandbox_svc.create_sandbox(
+                mode=backend,
+                timeout=timeout,
+                confirm_host_execution=bool(p.get("confirm_host_execution", False)),
+            )
+        except sandbox_svc.SandboxError as exc:
             return {
-                "sandbox": "blocked", "executed": False, "network": net,
+                "sandbox": "blocked", "backend": backend, "executed": False, "network": net,
                 "execution_status": "blocked_by_policy",
-                "message": "Host execution is disabled; configure VMware or explicitly enable it in an isolated lab.",
+                "capabilities": sandbox_svc.sandbox_capabilities(),
+                "message": str(exc),
             }
         import subprocess as sp
         try:
@@ -191,12 +199,25 @@ class Runner:
             # run when it is unavailable; the result will report no capture.
             need_admin = True
         monitor = sandbox_svc.BehaviorMonitor(watch_dirs=[str(Path(path).parent)])
-        sb = sandbox_svc.create_sandbox()
+        if isinstance(sb, sandbox_svc.SandboxieRunner):
+            run = sb.run_and_capture(path, str(config.CAPTURES_DIR),
+                                     config.SANDBOX_RUN_ARGS, timeout=timeout)
+            return {"sandbox": "sandboxie", "run": run,
+                    "network": {"ok": False, "status": "sandbox_policy"},
+                    "execution_status": run.get("execution_status", "failed"),
+                    "error": "" if run.get("executed") else run.get("error", "")}
         if isinstance(sb, sandbox_svc.VMSandbox):
             run = sb.run_and_capture(path, str(config.UNPACKED_DIR),
                                      config.SANDBOX_RUN_ARGS, timeout=timeout)
             return {"sandbox": "vmware", "run": run, "network": net,
                     "error": "" if run.get("ok") else run.get("error", "")}
+        if isinstance(sb, sandbox_svc.WindowsSandbox):
+            run = sb.run_and_capture(path, str(config.CAPTURES_DIR),
+                                     config.SANDBOX_RUN_ARGS, timeout=timeout)
+            return {"sandbox": "windows_sandbox", "run": run,
+                    "network": {"ok": True, "disabled": True},
+                    "execution_status": run.get("execution_status", "failed"),
+                    "error": "" if run.get("executed") else run.get("error", "")}
         capture = pcap_svc.start_capture_session(pcap_path) if not need_admin else None
         run = sb.run(path, config.SANDBOX_RUN_ARGS)
         if capture:

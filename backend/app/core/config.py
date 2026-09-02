@@ -103,6 +103,16 @@ class Config:
     USE_SANDBOX_VM = os.environ.get("REVLAB_SANDBOX_VM", "0") == "1"
     VM_SNAPSHOT = os.environ.get("REVLAB_VM_SNAPSHOT", "")
     VM_GUEST_PATH = os.environ.get("REVLAB_VM_GUEST_PATH", "C:\\RevLab\\sample.exe")
+    # Dynamic execution is fail-closed.  ``auto`` only selects a backend that
+    # is actually installed/configured; it never turns host execution on.
+    DYNAMIC_BACKEND = os.environ.get("REVLAB_DYNAMIC_BACKEND", "auto").strip().lower()
+    WINDOWS_SANDBOX_EXE = os.environ.get(
+        "REVLAB_WINDOWS_SANDBOX_EXE", r"C:\Windows\System32\WindowsSandbox.exe"
+    )
+    # Optional lightweight isolation. Sandboxie-Plus is detected locally and
+    # is never installed or started by REVLab.
+    SANDBOXIE_START = os.environ.get("REVLAB_SANDBOXIE_START", "").strip()
+    SANDBOXIE_BOX = os.environ.get("REVLAB_SANDBOXIE_BOX", "REVLab")
     CAPTURE_DURATION = int(os.environ.get("REVLAB_CAPTURE_DURATION", "30"))
 
 

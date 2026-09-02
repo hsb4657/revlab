@@ -232,14 +232,16 @@ def delete_sample(sample_id: int, db: Session = Depends(get_db)):
 def status():
     from ..services.ghidra_bridge import ghidra_available
     from ..services.environment import inspect_environment
+    from ..services import sandbox
     environment = inspect_environment()
-    vm_configured = bool(config.USE_SANDBOX_VM and config.VM_SNAPSHOT and os.environ.get("REVLAB_VM_VMX", ""))
+    capabilities = sandbox.sandbox_capabilities()
+    vm_configured = capabilities["backends"]["vmware"]["available"]
+    selected_backend = capabilities["selected"]
     dynamic_execution = {
-        "allowed": vm_configured or bool(config.ALLOW_HOST_EXECUTION),
-        "mode": "vmware" if vm_configured else ("host" if config.ALLOW_HOST_EXECUTION else "blocked"),
-        "reason": "configured_isolated_vm" if vm_configured else (
-            "explicit_host_execution" if config.ALLOW_HOST_EXECUTION else "sandbox_vm_not_configured"
-        ),
+        "allowed": selected_backend != "blocked",
+        "mode": selected_backend,
+        "reason": capabilities["message"],
+        "capabilities": capabilities,
     }
     return {
         "ok": True,
@@ -248,7 +250,7 @@ def status():
         "pe_sieve": Path(config.PESIEVE_PATH).exists(),
         "vmware": Path(config.VMWARE_RUN).exists(),
         "pktmon": True,
-        "sandbox_mode": "vmware" if config.USE_SANDBOX_VM else "local",
+        "sandbox_mode": selected_backend,
         "host_execution_allowed": bool(config.ALLOW_HOST_EXECUTION),
         "dynamic_execution": dynamic_execution,
         "stages": wf_svc.DEFAULT_STAGE_ORDER,
