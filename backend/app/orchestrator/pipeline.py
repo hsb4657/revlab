@@ -175,8 +175,19 @@ class Runner:
         timeout = int(p.get("timeout", 60))
         pcap_path = str(config.CAPTURES_DIR / f"{self.sample_id}.pcap")
         net = {}
+        if not config.USE_SANDBOX_VM and not config.ALLOW_HOST_EXECUTION:
+            return {
+                "sandbox": "blocked", "executed": False, "network": net,
+                "execution_status": "blocked_by_policy",
+                "message": "Host execution is disabled; configure VMware or explicitly enable it in an isolated lab.",
+            }
         import subprocess as sp
-        need_admin = sp.run(["pktmon", "list"], capture_output=True).returncode != 0
+        try:
+            need_admin = sp.run(["pktmon", "list"], capture_output=True).returncode != 0
+        except (FileNotFoundError, sp.TimeoutExpired):
+            # pktmon is a Windows optional capability. The sample can still
+            # run when it is unavailable; the result will report no capture.
+            need_admin = True
         monitor = sandbox_svc.BehaviorMonitor(watch_dirs=[str(Path(path).parent)])
         sb = sandbox_svc.create_sandbox()
         if isinstance(sb, sandbox_svc.VMSandbox):
@@ -184,16 +195,17 @@ class Runner:
                                      config.SANDBOX_RUN_ARGS, timeout=timeout)
             return {"sandbox": "vmware", "run": run, "network": net,
                     "error": "" if run.get("ok") else run.get("error", "")}
-        if not need_admin:
-            pcap_svc.pktmon_start(pcap_path)
+        capture = pcap_svc.start_capture_session(pcap_path) if not need_admin else None
         run = sb.run(path, config.SANDBOX_RUN_ARGS)
-        if not need_admin:
-            pcap_svc.pktmon_stop()
-            pcap_svc.pktmon_etl2pcap(pcap_path, pcap_path)
-            if Path(pcap_path).exists():
-                net = pcap_svc.parse_pcap(Path(pcap_path).read_bytes())
+        if capture:
+            capture_result = pcap_svc.finish_capture_session(capture)
+            if capture_result.get("ok"):
+                net = capture_result
                 run["behavior"]["dns"] = net.get("dns_queries", [])
+            else:
+                net = capture_result
         return {"sandbox": "local", "run": run, "network": net,
+                "pcap_path": pcap_path if net.get("ok") else "",
                 "admin_required": need_admin}
 
     def _stage_report(self, sample: Sample, results: dict) -> dict:
@@ -252,6 +264,15 @@ class Runner:
                         results["dynamic"] = self._stage_dynamic(path)
                         results["network"] = results["dynamic"].get("network", {})
                         results["behavior"] = (results["dynamic"].get("run") or {}).get("behavior", {})
+                        if results["dynamic"].get("pcap_path"):
+                            db = SessionLocal()
+                            try:
+                                s2 = db.query(Sample).filter(Sample.id == self.sample_id).first()
+                                if s2:
+                                    s2.pcap_path = results["dynamic"]["pcap_path"]
+                                    db.commit()
+                            finally:
+                                db.close()
                     elif st == "report":
                         r = self._stage_report(sample, results)
                         results["report"] = r

@@ -13,36 +13,74 @@ LINKTYPE_ETHERNET = 1
 # ================================================================ pktmon
 def pktmon_start(etl_path: str) -> bool:
     """启动 pktmon 抓包(需管理员权限)。"""
-    p = subprocess.run(["pktmon", "start", "--capture", "--pkt-size", "0",
-                        "--file-name", etl_path, "--comp", "nics"],
-                       capture_output=True)
-    return p.returncode == 0
+    try:
+        p = subprocess.run(["pktmon", "start", "--capture", "--pkt-size", "0",
+                            "--file-name", etl_path, "--comp", "nics"],
+                           capture_output=True)
+        return p.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 def pktmon_stop() -> bool:
-    p = subprocess.run(["pktmon", "stop"], capture_output=True)
-    return p.returncode == 0
+    try:
+        p = subprocess.run(["pktmon", "stop"], capture_output=True)
+        return p.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 def pktmon_etl2pcap(etl_path: str, pcap_path: str) -> bool:
-    p = subprocess.run(["pktmon", "etl2pcap", etl_path, "-o", pcap_path],
-                       capture_output=True)
-    return p.returncode == 0 and Path(pcap_path).exists()
+    try:
+        p = subprocess.run(["pktmon", "etl2pcap", etl_path, "-o", pcap_path],
+                           capture_output=True)
+        return p.returncode == 0 and Path(pcap_path).exists()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def start_capture_session(out_pcap: str, etl_path: str = "") -> dict:
+    """Start a pktmon session with distinct ETL and PCAP paths."""
+    pcap_path = Path(out_pcap)
+    etl_path = Path(etl_path) if etl_path else pcap_path.with_suffix(".etl")
+    pcap_path.parent.mkdir(parents=True, exist_ok=True)
+    started = pktmon_start(str(etl_path))
+    return {
+        "started": started,
+        "etl_path": str(etl_path),
+        "pcap_path": str(pcap_path),
+        "error": "" if started else "pktmon start failed (needs admin)",
+    }
+
+
+def finish_capture_session(session: dict) -> dict:
+    """Stop, convert, and parse a session started by ``start_capture_session``."""
+    if not session.get("started"):
+        return {"ok": False, "error": session.get("error", "capture did not start")}
+    stopped = pktmon_stop()
+    converted = stopped and pktmon_etl2pcap(session["etl_path"], session["pcap_path"])
+    pcap_path = Path(session["pcap_path"])
+    if not converted or not pcap_path.exists():
+        return {
+            "ok": False,
+            "pcap": str(pcap_path),
+            "etl": session["etl_path"],
+            "error": "pktmon conversion failed",
+        }
+    try:
+        parsed = parse_pcap(pcap_path.read_bytes())
+    except OSError as exc:
+        return {"ok": False, "pcap": str(pcap_path), "error": str(exc)}
+    return {"ok": True, "pcap": str(pcap_path), "etl": session["etl_path"], **parsed}
 
 
 def capture_network(duration: int, out_pcap: str, etl_path: str = "") -> dict:
     """抓包指定时长并转换为 pcap。返回 {ok, pcap, packet_count, error}。"""
-    etl_path = etl_path or str(Path(out_pcap).with_suffix(".etl"))
-    Path(out_pcap).parent.mkdir(parents=True, exist_ok=True)
-    if not pktmon_start(etl_path):
+    session = start_capture_session(out_pcap, etl_path)
+    if not session["started"]:
         return {"ok": False, "error": "pktmon start failed (needs admin). Run capture manually."}
     time.sleep(duration)
-    pktmon_stop()
-    ok = pktmon_etl2pcap(etl_path, out_pcap)
-    if ok:
-        parsed = parse_pcap(open(out_pcap, "rb").read())
-        return {"ok": True, "pcap": out_pcap, **parsed}
-    return {"ok": False, "error": "etl2pcap failed"}
+    return finish_capture_session(session)
 
 
 # ================================================================ pcap parse

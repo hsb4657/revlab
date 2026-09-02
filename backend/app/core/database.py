@@ -1,13 +1,25 @@
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import SQLALCHEMY_DATABASE_URL
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args={"check_same_thread": False, "timeout": 30},
     future=True,
 )
+
+
+@event.listens_for(engine, "connect")
+def _configure_sqlite_connection(connection, _record):
+    """Make concurrent task updates less likely to fail with SQLite locks."""
+    cursor = connection.cursor()
+    try:
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 Base = declarative_base()
 
@@ -32,11 +44,19 @@ def _ensure_legacy_columns():
         "status_version": "INTEGER DEFAULT 0",
         "cancel_requested": "INTEGER DEFAULT 0",
         "heartbeat_at": "DATETIME",
+        "definition_snapshot": "JSON DEFAULT '{}'",
     }
     with engine.begin() as connection:
         for name, definition in additions.items():
             if name not in columns:
                 connection.execute(text(f"ALTER TABLE graph_tasks ADD COLUMN {name} {definition}"))
+
+
+# Migrate legacy local databases on import as well as during application
+# startup.  CLI tools, tests, and MCP integrations can open SessionLocal
+# without constructing the FastAPI app first, so startup-only migration would
+# leave those callers unable to persist newer GraphTask fields.
+_ensure_legacy_columns()
 
 
 def get_db():

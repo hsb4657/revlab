@@ -1,5 +1,6 @@
 ﻿"""Ghidra Headless 反编译桥接"""
 import json
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -9,7 +10,11 @@ GHIDRA_SCRIPT = config.GHIDRA_DIR / "scripts" / "export_decompile.java"
 
 
 def find_ghidra_home() -> str:
-    if config.GHIDRA_HOME and Path(config.GHIDRA_HOME).exists():
+    def _valid_home(value: str | Path) -> bool:
+        root = Path(value)
+        return root.is_dir() and (root / "support" / "analyzeHeadless.bat").is_file()
+
+    if config.GHIDRA_HOME and _valid_home(config.GHIDRA_HOME):
         return config.GHIDRA_HOME
     import glob
     candidates = [
@@ -19,7 +24,7 @@ def find_ghidra_home() -> str:
     ]
     for pat in candidates:
         for p in sorted(glob.glob(pat)):
-            if (Path(p) / "support" / "analyzeHeadless.bat").exists():
+            if _valid_home(p):
                 return p
     return ""
 
@@ -36,7 +41,10 @@ def decompile_with_ghidra(sample_path: str, out_json: str, timeout: int = 600) -
     ah = Path(home) / "support" / "analyzeHeadless.bat"
     proj_dir = config.GHIDRA_DIR / "projects"
     proj_dir.mkdir(parents=True, exist_ok=True)
-    proj = "revlab"
+    # A shared project name lets concurrent tasks overwrite each other's
+    # imported program. Derive one deterministic project per output artifact.
+    project_key = hashlib.sha256(str(Path(out_json).resolve()).encode("utf-8")).hexdigest()[:16]
+    proj = f"revlab_{project_key}"
     log = config.GHIDRA_DIR / "ghidra_run.log"
     out_json = str(Path(out_json))
     script = str(GHIDRA_SCRIPT)

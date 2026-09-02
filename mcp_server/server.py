@@ -205,13 +205,25 @@ def run_dynamic(sample_id: int, timeout: int = 60) -> str:
     """在沙箱中运行样本,监控进程/文件/注册表行为(受控环境)。"""
     from app.services import sandbox
     s = _sample(sample_id)
-    sb = sandbox.create_sandbox()
+    if not config.USE_SANDBOX_VM and not config.ALLOW_HOST_EXECUTION:
+        return _j({
+            "ok": True,
+            "executed": False,
+            "execution_status": "blocked_by_policy",
+            "message": "Host execution is disabled; configure VMware or explicitly enable it in an isolated lab.",
+        })
+    try:
+        sb = sandbox.create_sandbox()
+    except sandbox.SandboxError as exc:
+        return _j({"ok": True, "executed": False,
+                   "execution_status": "blocked_by_policy", "message": str(exc)})
     if isinstance(sb, sandbox.VMSandbox):
         r = sb.run_and_capture(s.stored_path, str(config.UNPACKED_DIR), config.SANDBOX_RUN_ARGS, timeout)
-        return _j(r)
+        return _j({**r, "executed": bool(r.get("ok")), "runner": "vmware"})
     mon = sandbox.BehaviorMonitor(watch_dirs=[str(Path(s.stored_path).parent)])
     sb = sandbox.LocalSandbox(timeout=timeout, monitor=mon)
-    return _j(sb.run(s.stored_path, config.SANDBOX_RUN_ARGS))
+    result = sb.run(s.stored_path, config.SANDBOX_RUN_ARGS)
+    return _j({**result, "executed": bool(result.get("ok")), "runner": "local"})
 
 
 @mcp.tool()

@@ -115,6 +115,7 @@ class GraphTask(Base):
     workflow_id = Column(Integer, index=True)
     sample_id = Column(Integer, index=True, default=0)
     workflow_version = Column(String(64), default="")
+    definition_snapshot = Column(JSON, default=dict)
     name = Column(String(128), default="")
     status = Column(String(32), default="pending")   # pending/running/completed/failed/stopped
     status_version = Column(Integer, default=0)

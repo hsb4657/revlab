@@ -69,37 +69,37 @@ def inspect_environment() -> dict:
         },
         {
             "key": "node", "name": "Node.js and npm",
-            "ready": bool(node and npm), "required": True,
+            "ready": bool(node and npm), "required": False,
             "path": node or npm, "remedy": "Node.js LTS and workflow editor build",
         },
         {
             "key": "workflow_frontend", "name": "Workflow editor build",
-            "ready": (root / "frontend" / "wf-dist" / "index.html").exists(), "required": True,
+            "ready": (root / "frontend" / "wf-dist" / "index.html").exists(), "required": False,
             "path": str(root / "frontend" / "wf-dist"), "remedy": "npm ci and npm run build",
         },
         {
             "key": "java", "name": "Java 21",
-            "ready": java_major >= 21, "required": True,
+            "ready": java_major >= 21, "required": False,
             "path": java, "version": java_major, "remedy": "Microsoft OpenJDK 21",
         },
         {
             "key": "ghidra", "name": "Ghidra headless",
-            "ready": bool(ghidra_home), "required": True,
+            "ready": bool(ghidra_home), "required": False,
             "path": ghidra_home, "remedy": "official Ghidra runtime with SHA-256 verification",
         },
         {
             "key": "upx", "name": "UPX",
-            "ready": Path(config.UPX_PATH).exists(), "required": True,
+            "ready": Path(config.UPX_PATH).exists(), "required": False,
             "path": str(config.UPX_PATH), "remedy": "official UPX release",
         },
         {
             "key": "pe_sieve", "name": "PE-sieve",
-            "ready": Path(config.PESIEVE_PATH).exists(), "required": True,
+            "ready": Path(config.PESIEVE_PATH).exists(), "required": False,
             "path": str(config.PESIEVE_PATH), "remedy": "official PE-sieve release with SHA-256 verification",
         },
         {
             "key": "il2cpp_dumper", "name": "Il2CppDumper",
-            "ready": Path(config.IL2CPP_DUMPER_PATH).exists(), "required": True,
+            "ready": Path(config.IL2CPP_DUMPER_PATH).exists(), "required": False,
             "path": str(config.IL2CPP_DUMPER_PATH),
             "remedy": "official Perfare/Il2CppDumper source build with DummyDll enabled",
         },
@@ -123,7 +123,7 @@ def inspect_environment() -> dict:
         "missing": missing,
         "checks": checks,
         "job": job,
-        "auto_setup": os.environ.get("REVLAB_AUTO_SETUP", "1") == "1",
+        "auto_setup": os.environ.get("REVLAB_AUTO_SETUP", "0") == "1",
     }
 
 

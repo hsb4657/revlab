@@ -79,8 +79,20 @@ dynamic-analysis defaults need to be changed. The launch script loads this file
 only into the application process; it never writes secrets or paths back to the
 repository.
 
+`scripts/start.ps1` does not install missing dependencies implicitly. After a
+fresh checkout run `scripts/setup.ps1`; only pass `-AutoSetup` or set
+`REVLAB_AUTO_SETUP=1` when you explicitly want the launcher to run the core
+bootstrap.
+
 AI provider configuration is intentionally stored through the web application's
 model settings panel. It is kept in local runtime data and is not committed.
+
+The checked-in `.env.example` keeps remote access, host execution, unsafe
+workflow nodes, and automatic dependency setup disabled. Enable them only for
+an isolated lab and set `REVLAB_API_TOKEN` before binding the web server to a
+non-loopback address. Ghidra, UPX, PE-sieve, Il2CppDumper, pktmon, and Node.js
+are optional capabilities; missing tools are reported per node instead of
+blocking the complete application.
 
 ## Expected Capability Summary
 

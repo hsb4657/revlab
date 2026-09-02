@@ -34,8 +34,9 @@ def unpack_known(sample_path: str, packer_verdict: str, out_dir: str) -> dict:
             result["message"] = f"UPX unpack failed (rc={rc}): {se or so}"[:300]
         return result
 
-    # 其它已知壳(可扩展解压逻辑)
-    result["message"] = f"no automated unpacker for '{packer_verdict}'; falling back to memory dump"
+    # Other packers require the explicit, approved dynamic dump path. Do not
+    # claim a fallback has happened when no process was inspected.
+    result["message"] = f"no automated unpacker for '{packer_verdict}'; approved memory dump required"
     return result
 
 
@@ -54,7 +55,7 @@ def dump_with_pesieve(pid: int, out_dir: str, label: str = "dump") -> dict:
     return {
         "ok": rc == 0 and len(dumped) > 0,
         "path": str(dumped[0]) if dumped else "",
-        "message": (so or se) if rc else "",
+        "message": (so or se)[-1000:],
         "tool": "pe-sieve",
         "files": [str(p) for p in dumped],
     }

@@ -182,9 +182,22 @@ def get_report(sample_id: int, fmt: str = Query("html"), db: Session = Depends(g
     s = db.query(Sample).filter(Sample.id == sample_id).first()
     if not s or not s.summary or "report" not in s.summary:
         raise HTTPException(404, "no report yet")
-    paths = s.summary["report"]["paths"]
-    key = {"html": "html", "json": "json", "markdown": "markdown"}.get(fmt, "html")
-    return FileResponse(paths[key], media_type="text/html" if fmt == "html" else "application/json")
+    paths = s.summary["report"].get("paths") or s.summary["report"].get("report_paths") or {}
+    if fmt not in {"html", "json", "markdown"}:
+        raise HTTPException(400, "fmt must be html, json, or markdown")
+    key = fmt
+    path = paths.get(key)
+    resolved = resolve_sample_path(path) if path else None
+    output_root = Path(config.OUTPUT_ROOT).resolve()
+    try:
+        if resolved is None or not resolved.resolve().is_relative_to(output_root):
+            raise ValueError
+    except (ValueError, OSError):
+        raise HTTPException(404, f"report format '{fmt}' is not available")
+    if not resolved.is_file():
+        raise HTTPException(404, f"report format '{fmt}' is not available")
+    media_type = {"html": "text/html", "json": "application/json", "markdown": "text/markdown"}[fmt]
+    return FileResponse(resolved, media_type=media_type)
 
 
 @router.get("/samples/{sample_id}/report/text")
@@ -192,8 +205,16 @@ def get_report_text(sample_id: int, db: Session = Depends(get_db)):
     s = db.query(Sample).filter(Sample.id == sample_id).first()
     if not s or not s.summary or "report" not in s.summary:
         raise HTTPException(404, "no report yet")
-    p = s.summary["report"]["paths"]["markdown"]
-    return FileResponse(p, media_type="text/plain")
+    paths = s.summary["report"].get("paths") or s.summary["report"].get("report_paths") or {}
+    p = paths.get("markdown")
+    resolved = resolve_sample_path(p) if p else None
+    try:
+        valid = resolved is not None and resolved.resolve().is_relative_to(Path(config.OUTPUT_ROOT).resolve())
+    except (ValueError, OSError):
+        valid = False
+    if not valid or not resolved.is_file():
+        raise HTTPException(404, "markdown report is not available")
+    return FileResponse(resolved, media_type="text/plain")
 
 
 @router.delete("/samples/{sample_id}")

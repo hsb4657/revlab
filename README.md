@@ -102,6 +102,27 @@ scripts\start.bat
 
 打开浏览器访问 **http://127.0.0.1:8000**
 
+### 安全默认值与可选能力
+
+服务默认只允许本机访问 API，CORS 仅包含本地 UI；远程绑定时必须在请求头
+中提供 `X-REVLab-Token`，并设置 `REVLAB_API_TOKEN`。服务启动不会自动下载工具或
+Python 依赖，`REVLAB_AUTO_SETUP=1` 只会在显式启用后由环境页面触发安装。
+
+动态样本执行和自定义 Python/Bat/命令节点默认关闭：
+
+```text
+REVLAB_SANDBOX_VM=1                 # 推荐：配置 VMware 快照隔离
+REVLAB_VM_VMX=C:\Lab\revlab.vmx
+REVLAB_VM_SNAPSHOT=clean
+REVLAB_ALLOW_HOST_EXECUTION=1       # 仅隔离实验机，改为本机执行
+REVLAB_ENABLE_UNSAFE_NODES=1        # 仅需要脚本/命令节点时开启
+```
+
+Ghidra、UPX、PE-sieve、Il2CppDumper、pktmon 和 Node.js 都是按功能启用的可选能力。
+缺失时核心静态分析仍可运行，具体节点会返回明确的 `available`、`blocked_by_policy`
+或能力缺失状态，不会把候选地址、未执行的脱壳或未抓到的网络流量伪装成已验证结果。
+首次升级旧版 `data/revlab.db` 时，应用会自动执行只增加字段的兼容迁移。
+
 项目按 MIT 许可证开源；本地构建、测试和贡献约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ### 使用流程

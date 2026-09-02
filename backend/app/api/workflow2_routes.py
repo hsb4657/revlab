@@ -87,7 +87,7 @@ def wf2_run_task(wf_id: int, task_id: int):
         raise HTTPException(
             503,
             {
-                "message": "Environment setup is in progress",
+                "message": "Core environment is not ready",
                 "missing": environment.get("missing", []),
                 "job": environment.get("job", {}),
             },

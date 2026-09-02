@@ -54,9 +54,20 @@ class Engine:
         db = SessionLocal()
         try:
             t = db.query(GraphTask).filter(GraphTask.id == self.task_id).first()
-            wf = db.query(GraphWorkflow).filter(GraphWorkflow.id == t.workflow_id).first()
+            if not t:
+                raise RuntimeError(f"task {self.task_id} not found")
+            snapshot = copy.deepcopy(t.definition_snapshot or {})
+            if "nodes" in snapshot and "edges" in snapshot:
+                nodes, edges = snapshot.get("nodes") or [], snapshot.get("edges") or []
+            else:
+                # Tasks created before snapshot support retain their legacy
+                # behavior, while every new task is immutable by definition.
+                wf = db.query(GraphWorkflow).filter(GraphWorkflow.id == t.workflow_id).first()
+                if not wf:
+                    raise RuntimeError(f"workflow {t.workflow_id} not found")
+                nodes, edges = wf.nodes or [], wf.edges or []
             return (copy.deepcopy(t.node_states or {}), copy.deepcopy(t.variables or {}),
-                    copy.deepcopy(wf.nodes or []), copy.deepcopy(wf.edges or []))
+                    copy.deepcopy(nodes), copy.deepcopy(edges))
         finally:
             db.close()
 

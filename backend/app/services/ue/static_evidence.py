@@ -374,12 +374,13 @@ def _string_xref_global_candidates(data: bytes, sections: list[_Section]) -> dic
                 continue
 
             # 2. 找引用这些字符串的指令
-            str_ref_sites: list[int] = []
+            str_ref_sites: list[tuple[int, int]] = []
             for str_rva in str_rvas:
-                str_ref_sites.extend(target_to_matches.get(str_rva, []))
+                str_ref_sites.extend((site_rva, str_rva)
+                                     for site_rva in target_to_matches.get(str_rva, []))
 
             # 3. 在引用字符串的指令附近,找指向 .data 的 RIP loads
-            for site_rva in str_ref_sites:
+            for site_rva, str_rva in str_ref_sites:
                 for match_rva, target_rva in all_rip_loads:
                     if abs(match_rva - site_rva) > 128:
                         continue
@@ -392,7 +393,7 @@ def _string_xref_global_candidates(data: bytes, sections: list[_Section]) -> dic
                             candidate_evidence[key] = []
                         candidate_evidence[key].append({
                             "string": needle.decode("latin-1", "ignore"),
-                            "str_rva": next(r for r in str_rvas if r in target_to_matches.get(r, []) or True),
+                            "str_rva": str_rva,
                             "match_rva": match_rva,
                             "target_rva": target_rva,
                         })

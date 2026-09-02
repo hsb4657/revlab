@@ -1,6 +1,8 @@
 """图工作流管理与预置模板"""
 from __future__ import annotations
 import copy
+import hashlib
+import json
 
 from ..core.database import SessionLocal
 from ..models.sample import GraphWorkflow, GraphTask, Sample
@@ -89,6 +91,20 @@ def get_workflow(wf_id: int) -> dict | None:
 
 
 # ---------------------------------------------------------------- tasks
+def _workflow_snapshot(workflow: GraphWorkflow) -> tuple[dict, str]:
+    """Freeze the executable graph so task history stays reproducible."""
+    snapshot = {
+        "schema": "revlab.graph-workflow/v1",
+        "name": workflow.name,
+        "description": workflow.description,
+        "nodes": copy.deepcopy(workflow.nodes or []),
+        "edges": copy.deepcopy(workflow.edges or []),
+        "variables": copy.deepcopy(workflow.variables or []),
+    }
+    encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return snapshot, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def create_task(wf_id: int, name: str = "", variables: dict = None,
                 sample_id: int = 0) -> dict:
     db = SessionLocal()
@@ -119,8 +135,9 @@ def create_task(wf_id: int, name: str = "", variables: dict = None,
                 runtime_variables[key] = value.strip().lower() in {"1", "true", "yes", "on"}
             elif vtype == "number" and value not in (None, ""):
                 runtime_variables[key] = float(value) if "." in str(value) else int(value)
+        snapshot, workflow_version = _workflow_snapshot(wf)
         t = GraphTask(workflow_id=wf_id, sample_id=int(sample_id or 0),
-                      workflow_version=str(wf.updated_at or wf.created_at or ""),
+                      workflow_version=workflow_version, definition_snapshot=snapshot,
                       name=name or wf.name, status="pending", status_version=0,
                       cancel_requested=0, variables=runtime_variables, node_states={})
         db.add(t)
@@ -168,7 +185,8 @@ def list_tasks(wf_id: int = None, limit: int = 100) -> list:
                  "status": t.status, "error": t.error,
                  "node_states": t.node_states or {},
                  "variables": t.variables or {},
-                 "sample_id": t.sample_id or 0, "created_at": t.created_at.isoformat() + "Z" if t.created_at else None}
+                 "sample_id": t.sample_id or 0, "workflow_version": t.workflow_version,
+                 "created_at": t.created_at.isoformat() + "Z" if t.created_at else None}
                 for t in rows]
     finally:
         db.close()
@@ -182,6 +200,7 @@ def list_sample_tasks(sample_id: int, limit: int = 100) -> list:
         return [{"id": t.id, "workflow_id": t.workflow_id, "sample_id": t.sample_id or 0,
                  "name": t.name, "status": t.status, "error": t.error,
                  "node_states": t.node_states or {}, "variables": t.variables or {},
+                 "workflow_version": t.workflow_version,
                  "heartbeat_at": t.heartbeat_at.isoformat() + "Z" if t.heartbeat_at else None,
                  "created_at": t.created_at.isoformat() + "Z" if t.created_at else None}
                 for t in rows]
@@ -198,7 +217,8 @@ def get_task(task_id: int) -> dict | None:
         return {"id": t.id, "workflow_id": t.workflow_id, "name": t.name,
                 "status": t.status, "error": t.error,
                 "node_states": t.node_states or {}, "variables": t.variables or {},
-                "sample_id": t.sample_id or 0, "heartbeat_at": t.heartbeat_at.isoformat() + "Z" if t.heartbeat_at else None,
+                "sample_id": t.sample_id or 0, "workflow_version": t.workflow_version,
+                "heartbeat_at": t.heartbeat_at.isoformat() + "Z" if t.heartbeat_at else None,
                 "created_at": t.created_at.isoformat() + "Z" if t.created_at else None}
     finally:
         db.close()
@@ -250,7 +270,10 @@ def init_builtin_templates():
                 _node("unpack", "专用解包并验证产物", "unpack", {}, 1320, 0),
                 _node("cond_dynamic", "是否需要内存转储", "condition", {}, 1320, 150),
                 _node("approval", "内存转储/动态分析确认", "approval", {"message": "确认开始内存转储或动态行为分析"}, 1580, 150),
-                _node("dynamic", "内存转储/动态行为分析", "dynamic_analyze", {"timeout": 60}, 1840, 150),
+                _node("dynamic", "内存转储/动态行为分析", "dynamic_analyze", {
+                    "timeout": 60, "capture_network": True,
+                    "capture_memory_dump": True, "dump_delay_seconds": 2,
+                }, 1840, 150),
                 _node("disassemble", "反汇编与入口分析", "disassemble", {"max_insns": 3000}, 1580, 20),
                 _node("decompile", "Ghidra 反编译", "decompile", {"max_functions": 200}, 1840, 20),
                 _node("pe_ai_assist", "PE AI 辅助(壳/可疑点/建议)", "pe_ai_assist", {"sample_path": "{{sample_path}}"}, 2100, -120),

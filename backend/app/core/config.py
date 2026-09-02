@@ -32,6 +32,10 @@ SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 MAX_UPLOAD_SIZE = 200 * 1024 * 1024
 
 
+def _csv_env(name: str, default: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in os.environ.get(name, default).split(",") if item.strip())
+
+
 def _apply_output_root(root: Path):
     """Switch analysis output directories at runtime."""
     root = Path(root)
@@ -66,6 +70,16 @@ class Config:
     WORKSPACE_DIR = WORKSPACE_DIR
     DB_PATH = DB_PATH
     MAX_UPLOAD_SIZE = MAX_UPLOAD_SIZE
+
+    # The service is deliberately local-first. Remote API access requires a
+    # token and an explicit CORS allowlist instead of inheriting a permissive
+    # browser policy from the development server.
+    CORS_ORIGINS = _csv_env(
+        "REVLAB_CORS_ORIGINS", "http://127.0.0.1:8000,http://localhost:8000"
+    )
+    API_TOKEN = os.environ.get("REVLAB_API_TOKEN", "")
+    ENABLE_UNSAFE_NODES = os.environ.get("REVLAB_ENABLE_UNSAFE_NODES", "0") == "1"
+    ALLOW_HOST_EXECUTION = os.environ.get("REVLAB_ALLOW_HOST_EXECUTION", "0") == "1"
 
     ENABLE_GHIDRA = os.environ.get("REVLAB_ENABLE_GHIDRA", "1") == "1"
     # The repository installer uses this path by default; GHIDRA_HOME can

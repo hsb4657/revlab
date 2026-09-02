@@ -20,6 +20,7 @@ class BaseNode:
     icon = "⚙️"
     params_schema = []  # [{key,label,type,default,required,options?}]
     category = "通用"
+    risk_level = "safe"
 
     async def execute(self, ctx) -> NodeResult:
         raise NotImplementedError
@@ -42,6 +43,7 @@ def list_node_types() -> list:
     for t, cls in _NODES.items():
         out.append({"type": t, "label": cls.label, "icon": getattr(cls, "icon", "⚙️"),
                     "category": getattr(cls, "category", "通用"),
+                    "risk_level": getattr(cls, "risk_level", "safe"),
                     "params_schema": cls.params_schema})
     out.sort(key=lambda x: (x["category"], x["label"]))
     return out

@@ -5,7 +5,8 @@ param(
     [int]$McpPort = 8765,
     [switch]$NoMcp,
     [switch]$NoReload,
-    [switch]$NoSetup
+    [switch]$NoSetup,
+    [switch]$AutoSetup
 )
 
 # ASCII-only launcher for Windows PowerShell 5.1 compatibility.
@@ -42,16 +43,17 @@ function Test-PortInUse {
 
 function Test-PythonDependencies {
     if (-not (Test-Path -LiteralPath $pythonPath)) { return $false }
-    & $pythonPath -c "import fastapi,uvicorn,pefile,capstone,lief,sqlalchemy,fastmcp,mcp" *> $null
+    & $pythonPath -c "import fastapi,uvicorn,pefile,capstone,lief,sqlalchemy,fastmcp,mcp,dnfile" *> $null
     return ($LASTEXITCODE -eq 0)
 }
 
 Import-DotEnv $envFile
 $frontendIndex = Join-Path $repoRoot "frontend\wf-dist\index.html"
 $needsSetup = (-not (Test-PythonDependencies)) -or (-not (Test-Path -LiteralPath $frontendIndex))
-if ($needsSetup -and -not $NoSetup) {
+$envAutoSetup = $env:REVLAB_AUTO_SETUP -eq "1"
+if ($needsSetup -and -not $NoSetup -and ($AutoSetup -or $envAutoSetup)) {
     $setupPath = Join-Path $PSScriptRoot "setup.ps1"
-    Write-Host "[INFO] REVLab dependencies are incomplete; running core setup."
+    Write-Host "[INFO] REVLab dependencies are incomplete; running explicitly enabled core setup."
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setupPath -InstallPrerequisites
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Automatic setup failed. Run scripts\setup.ps1 to inspect the full report."
@@ -59,7 +61,11 @@ if ($needsSetup -and -not $NoSetup) {
     }
 }
 if (-not (Test-PythonDependencies)) {
-    Write-Error "REVLab .venv is missing or incomplete. Run scripts\setup.ps1 first."
+    if ($needsSetup -and -not $NoSetup -and -not ($AutoSetup -or $envAutoSetup)) {
+        Write-Error "REVLab dependencies are incomplete. Run scripts\setup.ps1 first, or pass -AutoSetup / set REVLAB_AUTO_SETUP=1."
+    } else {
+        Write-Error "REVLab .venv is missing or incomplete. Run scripts\setup.ps1 first."
+    }
     exit 1
 }
 

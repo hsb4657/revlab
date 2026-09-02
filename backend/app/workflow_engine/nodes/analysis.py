@@ -350,12 +350,24 @@ class DynamicAnalyzeNode(BaseNode):
     category = "动态"
     params_schema = [
         {"key": "timeout", "label": "运行超时(秒)", "type": "number", "default": 60},
+        {"key": "capture_network", "label": "抓取宿主网络会话", "type": "bool", "default": True},
+        {"key": "capture_memory_dump", "label": "启动后进行 PE-sieve 转储", "type": "bool", "default": False},
+        {"key": "dump_delay_seconds", "label": "转储前等待秒数", "type": "number", "default": 2},
     ]
 
     async def execute(self, ctx) -> NodeResult:
         from ...core.config import config
         from ...services import sandbox
 
+        if not config.USE_SANDBOX_VM and not config.ALLOW_HOST_EXECUTION:
+            return NodeResult(
+                outputs={
+                    "executed": False,
+                    "execution_status": "blocked_by_policy",
+                    "network": {"ok": False, "error": "host execution disabled"},
+                },
+                summary="动态执行被本机安全策略阻止",
+            )
         path = _sample_path(ctx["params"], ctx["pool"])
         if not path:
             return NodeResult(status="failed", error="无样本路径")
@@ -371,11 +383,31 @@ class DynamicAnalyzeNode(BaseNode):
                               error=result.get("error", ""))
         capture_dir = Path(ctx.get("output_dir") or config.OUTPUT_ROOT) / "captures"
         capture_dir.mkdir(parents=True, exist_ok=True)
+        task_label = str(ctx.get("task_id") or "adhoc")
         monitor = sandbox.BehaviorMonitor(watch_dirs=[str(Path(path).parent), str(capture_dir)])
         runner = sandbox.LocalSandbox(timeout=timeout, monitor=monitor)
-        result = runner.run(path, config.SANDBOX_RUN_ARGS)
+        capture = None
+        if ctx["params"].get("capture_network", True):
+            from ...services import pcap
+            capture = pcap.start_capture_session(str(capture_dir / f"task_{task_label}.pcap"))
+
+        def _dump_after_start(pid: int) -> dict:
+            if not ctx["params"].get("capture_memory_dump", False):
+                return {"ok": True, "status": "not_requested"}
+            from ...services import unpacker
+            delay = min(30, max(0, int(ctx["params"].get("dump_delay_seconds", 2) or 0)))
+            if delay:
+                time.sleep(delay)
+            return unpacker.dump_with_pesieve(pid, str(capture_dir / "memory_dump"), label=f"task_{task_label}")
+
+        result = runner.run(path, config.SANDBOX_RUN_ARGS, on_started=_dump_after_start)
+        network = {"ok": False, "error": "not_requested"}
+        if capture:
+            network = pcap.finish_capture_session(capture)
         return NodeResult(status="success" if result.get("ok") else "failed",
-                          outputs={"runner": "local", "result": result},
+                          outputs={"runner": "local", "executed": True, "result": result,
+                                   "network": network,
+                                   "memory_dump": result.get("startup_observer", {})},
                           summary=f"动态分析运行 {result.get('ran_seconds', 0)} 秒",
                           error=result.get("error", ""))
 

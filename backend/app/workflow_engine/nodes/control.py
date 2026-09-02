@@ -1,10 +1,11 @@
 """控制/脚本/审批/报告节点"""
 from __future__ import annotations
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
-from ...core.config import WORKSPACE_DIR
+from ...core.config import WORKSPACE_DIR, config
 from .base import BaseNode, NodeResult, register
 
 
@@ -57,6 +58,7 @@ class ScriptNode(BaseNode):
     label = "脚本节点(Python/Bat)"
     icon = "🧩"
     category = "控制"
+    risk_level = "dangerous"
     params_schema = [
         {"key": "lang", "label": "语言", "type": "select", "default": "python", "options": ["python", "bat"]},
         {"key": "script", "label": "脚本内容", "type": "textarea", "default": "", "required": True,
@@ -64,6 +66,11 @@ class ScriptNode(BaseNode):
     ]
 
     async def execute(self, ctx) -> NodeResult:
+        if not config.ENABLE_UNSAFE_NODES:
+            return NodeResult(
+                status="failed",
+                error="脚本节点默认禁用；仅在隔离实验环境设置 REVLAB_ENABLE_UNSAFE_NODES=1 后可用",
+            )
         lang = ctx["params"].get("lang", "python")
         script = ctx["params"].get("script", "")
         # 先解析占位符(把变量注入脚本文本)
@@ -71,22 +78,25 @@ class ScriptNode(BaseNode):
         rendered = resolve(script, ctx["pool"])
         workdir = str(WORKSPACE_DIR)
         Path(workdir).mkdir(parents=True, exist_ok=True)
+        sp = ""
         try:
             if lang == "python":
                 with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, dir=workdir, encoding="utf-8") as f:
                     f.write(rendered)
                     sp = f.name
-                p = subprocess.run(["python", sp], capture_output=True, text=True, timeout=120, cwd=workdir)
+                p = subprocess.run([sys.executable, sp], capture_output=True, text=True, timeout=120, cwd=workdir)
             else:
                 with tempfile.NamedTemporaryFile("w", suffix=".bat", delete=False, dir=workdir, encoding="utf-8") as f:
                     f.write(rendered)
                     sp = f.name
                 p = subprocess.run(["cmd", "/c", sp], capture_output=True, text=True, timeout=120, cwd=workdir)
-            Path(sp).unlink(missing_ok=True)
         except subprocess.TimeoutExpired:
             return NodeResult(status="failed", error="脚本超时(120s)")
         except Exception as e:
             return NodeResult(status="failed", error=f"脚本执行失败: {e}")
+        finally:
+            if sp:
+                Path(sp).unlink(missing_ok=True)
         stdout = (p.stdout or "")[:50000]
         # 解析 <WF_VAR>key:value</WF_VAR>
         outputs = {}
@@ -110,6 +120,7 @@ class CommandNode(BaseNode):
     label = "自定义命令"
     icon = "⌘"
     category = "自定义"
+    risk_level = "dangerous"
     params_schema = [
         {"key": "command", "label": "命令", "type": "text", "default": "", "required": True,
          "desc": "支持 {{变量}} 占位符; stdout 中的结果会写入变量池"},
@@ -118,6 +129,11 @@ class CommandNode(BaseNode):
     ]
 
     async def execute(self, ctx) -> NodeResult:
+        if not config.ENABLE_UNSAFE_NODES:
+            return NodeResult(
+                status="failed",
+                error="自定义命令默认禁用；仅在隔离实验环境设置 REVLAB_ENABLE_UNSAFE_NODES=1 后可用",
+            )
         from ...core.config import BASE_DIR
         from ..variables import resolve
         command = resolve(str(ctx["params"].get("command", "")), ctx["pool"])

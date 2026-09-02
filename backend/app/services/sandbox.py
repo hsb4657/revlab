@@ -1,6 +1,8 @@
 ﻿"""沙箱抽象层:VMware 快照回滚 / 本地受控运行 + 动态行为监控"""
 import datetime
+import ctypes
 import os
+import shlex
 import subprocess
 import threading
 import time
@@ -13,6 +15,30 @@ from ..core.config import config
 
 class SandboxError(Exception):
     pass
+
+
+def _split_process_args(args: str) -> list[str]:
+    """Parse a Windows command-line fragment without invoking a shell."""
+    if not args:
+        return []
+    if os.name != "nt":
+        return shlex.split(args)
+    argc = ctypes.c_int()
+    shell32 = ctypes.windll.shell32
+    kernel32 = ctypes.windll.kernel32
+    shell32.CommandLineToArgvW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    # The Windows API treats argv[0] specially; prepend a harmless executable
+    # token so a fragment such as ``--name="a b"`` is parsed correctly.
+    argv = shell32.CommandLineToArgvW("revlab-sample.exe " + args, ctypes.byref(argc))
+    if not argv:
+        raise ValueError("invalid command-line arguments")
+    try:
+        return [argv[index] for index in range(1, argc.value)]
+    finally:
+        kernel32.LocalFree(ctypes.cast(argv, ctypes.c_void_p))
 
 
 def _run(cmd: list, timeout: int = 120) -> tuple:
@@ -143,18 +169,28 @@ class LocalSandbox:
         self.monitor = monitor or BehaviorMonitor()
         self.result = {}
 
-    def run(self, sample_path: str, args: str = "") -> dict:
+    def run(self, sample_path: str, args: str = "", on_started=None) -> dict:
         Path(self.workdir).mkdir(parents=True, exist_ok=True)
         self.monitor.start()
         started = time.time()
-        cmd = f'"{sample_path}" {args}'.strip()
+        try:
+            arg_tokens = _split_process_args(str(args))
+        except ValueError as exc:
+            self.monitor.stop()
+            return {"ok": False, "error": f"invalid sandbox arguments: {exc}"}
         try:
             proc = subprocess.Popen(
-                cmd, cwd=self.workdir, shell=True,
+                [str(sample_path), *arg_tokens], cwd=self.workdir, shell=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=0x00000008 | 0x00000200,  # DETACHED | CREATE_NEW_CONSOLE
             )
             pid = proc.pid
+            startup_observer = {}
+            if on_started is not None:
+                try:
+                    startup_observer = on_started(pid) or {}
+                except Exception as exc:
+                    startup_observer = {"ok": False, "error": str(exc)}
             try:
                 proc.wait(timeout=self.timeout)
                 rc = proc.returncode
@@ -174,6 +210,7 @@ class LocalSandbox:
             "returncode": rc,
             "ran_seconds": ran_seconds,
             "behavior": self.monitor.summary(),
+            "startup_observer": startup_observer,
         }
         return self.result
 
@@ -263,4 +300,9 @@ def create_sandbox() -> object:
         if not vmx or not snap:
             raise SandboxError("VM sandbox enabled but REVLAB_VM_VMX / REVLAB_VM_SNAPSHOT not set")
         return VMSandbox(vmx, snap, config.VM_GUEST_PATH)
+    if not config.ALLOW_HOST_EXECUTION:
+        raise SandboxError(
+            "Host execution is disabled. Configure VMware or explicitly set "
+            "REVLAB_ALLOW_HOST_EXECUTION=1 in an isolated lab environment."
+        )
     return LocalSandbox(timeout=config.SANDBOX_TIMEOUT)

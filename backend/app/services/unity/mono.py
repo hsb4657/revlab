@@ -11,8 +11,6 @@
 """
 from __future__ import annotations
 import re
-import subprocess
-import sys
 from pathlib import Path
 
 import pefile as _pefile
@@ -30,7 +28,7 @@ _dnfile_tried = False
 
 
 def _ensure_dnfile():
-    """尝试导入 dnfile;失败则 pip install(超时 90s)。返回模块或 None。"""
+    """Return the declared dependency without mutating the environment at runtime."""
     global _dnfile, _dnfile_tried
     if _dnfile_tried:
         return _dnfile
@@ -41,19 +39,7 @@ def _ensure_dnfile():
         return _dnfile
     except ImportError:
         pass
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet", "dnfile"],
-            timeout=90, capture_output=True,
-        )
-    except Exception:
-        return None
-    try:
-        import dnfile  # noqa
-        _dnfile = dnfile
-    except ImportError:
-        _dnfile = None
-    return _dnfile
+    return None
 
 
 def _machine_to_arch(machine: int) -> str:

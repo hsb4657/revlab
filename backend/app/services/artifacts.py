@@ -70,7 +70,8 @@ def _relative(path: Path) -> str:
 
 def run_directory(task: GraphTask, workflow: GraphWorkflow | None = None) -> Path:
     """Return the stable output directory assigned to a graph task."""
-    workflow_name = workflow.name if workflow else task.name
+    snapshot = task.definition_snapshot or {}
+    workflow_name = str(snapshot.get("name") or (workflow.name if workflow else task.name))
     variables = task.variables or {}
     target = str(variables.get("target_path") or variables.get("sample_path") or "")
     target_path = Path(target.rstrip("\\/")) if target else None
