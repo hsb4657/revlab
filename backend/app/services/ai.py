@@ -56,6 +56,8 @@ def _evidence_status(value: object) -> str:
             return "runtime" if key in {"execution_status", "evidence_status"} else "static"
         if raw in {"candidate", "unconfirmed", "inferred", "ai_inferred"}:
             return "inferred"
+        if raw in {"failed", "error", "inspection_failed", "decryption_failed"}:
+            return "blocked"
     if value.get("executed") is False:
         return "blocked"
     if value.get("executed") is True or value.get("execution_available") is True:

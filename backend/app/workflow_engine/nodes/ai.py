@@ -130,6 +130,8 @@ def _pe_ai_evidence(pool: dict) -> dict:
     dynamic_status = dynamic.get("execution_status") if isinstance(dynamic, dict) else None
     if not dynamic_status and isinstance(dynamic_result, dict):
         dynamic_status = dynamic_result.get("execution_status") or dynamic_result.get("status")
+    if not dynamic_status and isinstance(dynamic, dict) and dynamic.get("executed") is True:
+        dynamic_status = "completed" if dynamic.get("ok", True) else "failed"
     if not dynamic:
         dynamic = {"execution_status": "not_collected", "executed": False,
                    "reason": "工作流未包含动态阶段或该阶段尚未运行"}
