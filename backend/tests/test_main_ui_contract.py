@@ -22,6 +22,9 @@ class MainUiContractTests(unittest.TestCase):
             "prepareEnvironment: (force = false)",
             "function renderEnvironment(status)",
             "function prepareEnvironment()",
+            "const workspaceNotice = $('#workspace-notice');",
+            "async function request(url, options = {})",
+            "id=\"overview-dynamic-policy\"",
         ):
             self.assertIn(value, self.html if value.startswith('id=') else self.script)
 

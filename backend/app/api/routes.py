@@ -1,4 +1,5 @@
 ﻿from pathlib import Path
+import os
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -232,6 +233,14 @@ def status():
     from ..services.ghidra_bridge import ghidra_available
     from ..services.environment import inspect_environment
     environment = inspect_environment()
+    vm_configured = bool(config.USE_SANDBOX_VM and config.VM_SNAPSHOT and os.environ.get("REVLAB_VM_VMX", ""))
+    dynamic_execution = {
+        "allowed": vm_configured or bool(config.ALLOW_HOST_EXECUTION),
+        "mode": "vmware" if vm_configured else ("host" if config.ALLOW_HOST_EXECUTION else "blocked"),
+        "reason": "configured_isolated_vm" if vm_configured else (
+            "explicit_host_execution" if config.ALLOW_HOST_EXECUTION else "sandbox_vm_not_configured"
+        ),
+    }
     return {
         "ok": True,
         "ghidra": bool(ghidra_available()) and find_ghidra_home(),
@@ -240,6 +249,8 @@ def status():
         "vmware": Path(config.VMWARE_RUN).exists(),
         "pktmon": True,
         "sandbox_mode": "vmware" if config.USE_SANDBOX_VM else "local",
+        "host_execution_allowed": bool(config.ALLOW_HOST_EXECUTION),
+        "dynamic_execution": dynamic_execution,
         "stages": wf_svc.DEFAULT_STAGE_ORDER,
         "environment_ready": environment["ready"],
         "environment_missing": environment["missing"],

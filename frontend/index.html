@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>REVLab · Windows PE 逆向工作流</title>
-<link rel="stylesheet" href="/static/css/style.css?v=3.1.2">
+<link rel="stylesheet" href="/static/css/tokens.css?v=1.0.0">
+<link rel="stylesheet" href="/static/css/style.css?v=3.2.0">
 </head>
 <body>
 <header>
@@ -23,6 +24,7 @@
 </header>
 
 <main>
+  <div id="workspace-notice" class="workspace-notice" role="status" aria-live="polite"></div>
   <!-- ==================== 样本库 ==================== -->
   <section id="view-samples" class="view active">
     <div class="toolbar">
@@ -30,6 +32,13 @@
       <select id="upload-workflow" title="分析工作流"></select>
       <button id="btn-refresh">刷新</button>
       <span id="upload-progress"></span>
+    </div>
+
+    <div class="workspace-overview" aria-label="工作区概览">
+      <article class="overview-item"><span class="overview-label">样本总数</span><strong id="overview-sample-count">—</strong><small id="overview-sample-meta">等待读取</small></article>
+      <article class="overview-item"><span class="overview-label">当前样本</span><strong id="overview-current-sample">未选择</strong><small id="overview-current-meta">从列表选择一个样本</small></article>
+      <article class="overview-item"><span class="overview-label">工作区状态</span><strong id="overview-environment">检查中</strong><small id="overview-environment-meta">能力状态会自动刷新</small></article>
+      <article class="overview-item overview-policy"><span class="overview-label">动态执行</span><strong id="overview-dynamic-policy">策略阻止</strong><small id="overview-dynamic-meta">未配置隔离 VM</small></article>
     </div>
 
     <div id="sample-detail" class="panel hidden">
@@ -335,6 +344,6 @@
   REVLab v2.0 — 实验室自研软件合规逆向测试。样本与数据仅在本机处理,无外联。
 </footer>
 
-<script src="/static/js/app.js?v=3.1.2"></script>
+<script src="/static/js/app.js?v=3.2.0"></script>
 </body>
 </html>

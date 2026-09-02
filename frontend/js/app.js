@@ -1,39 +1,65 @@
 /* REVLab 前端逻辑 */
 const $ = (sel) => document.querySelector(sel);
-async function aiRequest(url, options = {}) {
+const workspaceNotice = $('#workspace-notice');
+function setNotice(message = '', kind = 'info') {
+  if (!workspaceNotice) return;
+  workspaceNotice.textContent = message;
+  workspaceNotice.className = `workspace-notice ${message ? `is-${kind}` : ''}`;
+}
+function setBusy(button, busy, label = '处理中…') {
+  if (!button) return;
+  if (busy) {
+    button.dataset.idleLabel = button.textContent;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.textContent = label;
+  } else {
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    if (button.dataset.idleLabel) button.textContent = button.dataset.idleLabel;
+  }
+}
+async function request(url, options = {}) {
   const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = data.detail || data || {};
-    throw new Error(detail.message || detail.error || JSON.stringify(detail) || `HTTP ${response.status}`);
+    const message = typeof detail === 'string' ? detail : (detail.message || detail.error || `HTTP ${response.status}`);
+    const error = new Error(message);
+    error.status = response.status;
+    error.data = data;
+    throw error;
   }
   return data;
 }
+async function aiRequest(url, options = {}) {
+  return request(url, options);
+}
 const api = {
-  list: () => fetch('/api/samples').then(r => r.json()),
-  get: (id) => fetch(`/api/samples/${id}`).then(r => r.json()),
-  pipeline: (id) => fetch(`/api/samples/${id}/pipeline`).then(r => r.json()),
+  list: () => request('/api/samples'),
+  get: (id) => request(`/api/samples/${id}`),
+  pipeline: (id) => request(`/api/samples/${id}/pipeline`),
   upload: (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    return fetch('/api/samples/upload', { method: 'POST', body: fd }).then(r => r.json());
+    return request('/api/samples/upload', { method: 'POST', body: fd });
   },
   analyze: (id, wf = 'full-auto', sync = false) =>
-    fetch(`/api/samples/${id}/analyze?workflow=${encodeURIComponent(wf)}&sync=${sync}`,
-          { method: 'POST' }).then(r => r.json()),
+    request(`/api/samples/${id}/analyze?workflow=${encodeURIComponent(wf)}&sync=${sync}`,
+          { method: 'POST' }),
   disasm: (id, addr, n) =>
-    fetch(`/api/samples/${id}/disassembly?addr=${encodeURIComponent(addr)}&max_insns=${n}`).then(r => r.json()),
-  status: () => fetch('/api/status').then(r => r.json()),
-  wfList: () => fetch('/api/workflows').then(r => r.json()),
-  wfMeta: () => fetch('/api/workflows/meta').then(r => r.json()),
-  wfCreate: (d) => fetch('/api/workflows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }).then(r => r.json()),
-  wfSave: (name, d) => fetch(`/api/workflows/${name}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }).then(r => r.json()),
-  wfDel: (name) => fetch(`/api/workflows/${name}`, { method: 'DELETE' }).then(r => r.json()),
-  aiGet: () => fetch('/api/ai/config').then(r => r.json()),
-  aiSave: (d) => fetch('/api/ai/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }).then(r => r.json()),
-  aiTest: (d) => fetch('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }).then(r => r.json()),
-  aiChat: (msgs) => fetch('/api/ai/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: msgs }) }).then(r => r.json()),
-  aiSummarize: (id, prompt) => fetch(`/api/ai/summarize/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }) }).then(r => r.json()),
+    request(`/api/samples/${id}/disassembly?addr=${encodeURIComponent(addr)}&max_insns=${n}`),
+  status: () => request('/api/status'),
+  wfList: () => request('/api/workflows'),
+  wfMeta: () => request('/api/workflows/meta'),
+  wfCreate: (d) => request('/api/workflows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
+  wfSave: (name, d) => request(`/api/workflows/${name}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
+  wfDel: (name) => request(`/api/workflows/${name}`, { method: 'DELETE' }),
+  aiGet: () => request('/api/ai/config'),
+  aiSave: (d) => request('/api/ai/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
+  aiTest: (d) => request('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
+  aiChat: (msgs) => request('/api/ai/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: msgs }) }),
+  aiSummarize: (id, prompt) => request(`/api/ai/summarize/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }) }),
   aiSessions: () => aiRequest('/api/ai/sessions'),
   aiSession: (id) => aiRequest(`/api/ai/sessions/${encodeURIComponent(id)}`),
   aiSessionCreate: (d = {}) => aiRequest('/api/ai/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
@@ -43,15 +69,15 @@ const api = {
   aiSessionCompress: (id, d = {}) => aiRequest(`/api/ai/sessions/${encodeURIComponent(id)}/compress`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
   aiWorkflowGenerate: (prompt, sampleId) => aiRequest('/api/ai/workflows/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, sample_id: sampleId || 0 }) }),
   aiWorkflowSave: (d) => aiRequest('/api/ai/workflows/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) }),
-  engineSpec: (e) => fetch(`/api/engine/${e}/spec`).then(r => r.json()),
-  engineAnalyze: (e, body) => fetch(`/api/engine/${e}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json()),
-  engineList: (e) => fetch(`/api/engine/${e}/analyses`).then(r => r.json()),
-  engineGet: (e, id) => fetch(`/api/engine/${e}/analyses/${id}`).then(r => r.json()),
-  engineRerun: (e, id) => fetch(`/api/engine/${e}/analyses/${id}/rerun`, { method: 'POST' }).then(r => r.json()),
-  engineDel: (e, id) => fetch(`/api/engine/${e}/analyses/${id}`, { method: 'DELETE' }).then(r => r.json()),
-  ueVersions: () => fetch('/api/ue/versions').then(r => r.json()),
-  ueVersion: (ver) => fetch(`/api/ue/version/${encodeURIComponent(ver)}`).then(r => r.json()),
-  ueSignatures: () => fetch('/api/ue/signatures').then(r => r.json()),
+  engineSpec: (e) => request(`/api/engine/${e}/spec`),
+  engineAnalyze: (e, body) => request(`/api/engine/${e}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }),
+  engineList: (e) => request(`/api/engine/${e}/analyses`),
+  engineGet: (e, id) => request(`/api/engine/${e}/analyses/${id}`),
+  engineRerun: (e, id) => request(`/api/engine/${e}/analyses/${id}/rerun`, { method: 'POST' }),
+  engineDel: (e, id) => request(`/api/engine/${e}/analyses/${id}`, { method: 'DELETE' }),
+  ueVersions: () => request('/api/ue/versions'),
+  ueVersion: (ver) => request(`/api/ue/version/${encodeURIComponent(ver)}`),
+  ueSignatures: () => request('/api/ue/signatures'),
   environment: () => aiRequest('/api/environment'),
   prepareEnvironment: (force = false) => aiRequest('/api/environment/prepare', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force }),
@@ -115,14 +141,43 @@ function loadStatus() {
       ['VMware', s.vmware], ['pktmon', true]
     ].map(([n, ok]) => `<span class="pkt">${n} ${ok ? '✓' : '✗'}</span>`).join('');
     $('#sys-status').innerHTML = `沙箱:${s.sandbox_mode} ${tags}`;
-  }).catch(() => {});
+    const env = $('#overview-environment');
+    const envMeta = $('#overview-environment-meta');
+    const dynamic = $('#overview-dynamic-policy');
+    const dynamicMeta = $('#overview-dynamic-meta');
+    const dynamicState = s.dynamic_execution || {};
+    const vmReady = dynamicState.mode === 'vmware' && dynamicState.allowed;
+    if (env) env.textContent = s.environment_ready ? '已就绪' : '待配置';
+    if (envMeta) envMeta.textContent = s.environment_ready ? '核心分析能力可用' : `缺少 ${(s.environment_missing || []).length} 项能力`;
+    if (dynamic) dynamic.textContent = vmReady ? '隔离 VM' : (dynamicState.mode === 'host' ? '宿主机' : '策略阻止');
+    if (dynamicMeta) dynamicMeta.textContent = vmReady ? '允许在快照中运行' : (dynamicState.mode === 'host' ? '已显式允许宿主机执行' : '配置 VMX 与快照后可运行');
+  }).catch((error) => {
+    $('#sys-status').textContent = '服务状态不可用';
+    const env = $('#overview-environment');
+    if (env) env.textContent = '不可用';
+    setNotice(`无法读取服务状态：${error.message}`, 'error');
+  });
 }
 
 /* ---------------- 样本列表 ---------------- */
 async function loadList() {
-  const rows = await api.list();
   const tb = $('#sample-table tbody');
+  tb.innerHTML = '<tr><td colspan="9" class="table-state">正在读取样本库…</td></tr>';
+  let rows;
+  try { rows = await api.list(); } catch (error) {
+    tb.innerHTML = `<tr><td colspan="9" class="table-state error">样本库读取失败：${esc(error.message)}</td></tr>`;
+    setNotice(`样本库读取失败：${error.message}`, 'error');
+    return;
+  }
+  const count = $('#overview-sample-count');
+  const meta = $('#overview-sample-meta');
+  if (count) count.textContent = rows.length;
+  if (meta) meta.textContent = rows.length ? `最近 ${Math.min(rows.length, 200)} 条记录` : '还没有上传样本';
   tb.innerHTML = '';
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="9" class="table-state">暂无样本。上传一个 PE 文件后，分析结果会出现在这里。</td></tr>';
+    return;
+  }
   for (const s of rows) {
     const tr = document.createElement('tr');
     tr.className = 'clickable';
@@ -145,6 +200,10 @@ async function loadList() {
 /* ---------------- 详情 + 工作流可视化 ---------------- */
 async function selectSample(id) {
   current = id;
+  const currentEl = $('#overview-current-sample');
+  const currentMeta = $('#overview-current-meta');
+  if (currentEl) currentEl.textContent = `#${id}`;
+  if (currentMeta) currentMeta.textContent = '正在读取样本详情';
   const ueSid = $('#ue-sample-id'); if (ueSid) ueSid.value = id;
   $('#sample-detail').classList.remove('hidden');
   if (pollTimer) clearInterval(pollTimer);
@@ -180,7 +239,10 @@ async function renderPipeline(id) {
         `[${(l.started_at || '').slice(11, 19)}] ${l.stage} ${l.success ? '✓' : '✗'} ${l.error || ''}`).join('\n');
     }
     if (p.status === 'analyzing') $('#detail-status').textContent = 'analyzing · ' + p.stage;
-  } catch (e) { /* noop */ }
+  } catch (e) {
+    $('#wf-flow-wrap').classList.remove('hidden');
+    $('#wf-flow').innerHTML = `<div class="inline-state error">流水线状态读取失败：${esc(e.message)}</div>`;
+  }
 }
 
 const ICONS = { identify: '🔍', unpack: '📦', disassemble: '🔬', decompile: '🧩', dynamic: '⚡', report: '📄' };
@@ -188,7 +250,13 @@ const TITLES = { identify: '识别', unpack: '脱壳', disassemble: '反汇编',
 
 async function renderDetail(id) {
   let s;
-  try { s = await api.get(id); } catch { return; }
+  try { s = await api.get(id); } catch (error) {
+    $('#detail-body').innerHTML = `<div class="inline-state error">样本详情读取失败：${esc(error.message)}</div>`;
+    setNotice(`样本 #${id} 读取失败：${error.message}`, 'error');
+    return;
+  }
+  const currentMeta = $('#overview-current-meta');
+  if (currentMeta) currentMeta.textContent = `${s.file_name} · ${s.status || 'unknown'}`;
   $('#detail-name').textContent = `${s.file_name} (#${s.id})`;
   const stCls = { analyzed: 'ok', analyzing: 'warn', error: 'bad', uploaded: 'info' }[s.status] || 'info';
   $('#detail-status').className = `badge ${stCls}`;
@@ -244,7 +312,14 @@ async function renderDetail(id) {
   const net = sum.network || {};
   html += `<h3>网络</h3><p>连接 ${(net.connections || []).length},DNS ${(net.dns_queries || []).length},HTTP ${(net.http_requests || []).length},SNI ${(net.sni || []).length}</p>`;
   const dyn = sum.dynamic || {};
-  html += `<h3>动态</h3><p>${dyn.error ? '<span class="badge bad">' + esc(dyn.error) + '</span>' : '运行 ' + ((dyn.run || {}).ran_seconds || '-') + 's,新增进程 ' + (((dyn.run || {}).behavior || {}).new_processes || []).length + ' 个'}</p>`;
+  const dynBlocked = dyn.execution_status === 'blocked_by_policy' || dyn.sandbox === 'blocked';
+  const dynSkipped = !Object.keys(dyn).length && (sum._pipeline_status || []).some(node => node.name === 'dynamic' && node.status === 'skipped');
+  html += `<h3>动态</h3><p>${dynSkipped
+    ? '<span class="badge info">未纳入工作流</span> 当前运行使用静态分析工作流。'
+    : dynBlocked
+    ? '<span class="badge warn">未执行</span> ' + esc(dyn.message || '当前策略禁止宿主机执行，需先配置隔离 VM。')
+    : dyn.error ? '<span class="badge bad">' + esc(dyn.error) + '</span>'
+    : '运行 ' + ((dyn.run || {}).ran_seconds || '-') + 's,新增进程 ' + (((dyn.run || {}).behavior || {}).new_processes || []).length + ' 个'}</p>`;
 
   if (s.error) html += `<p class="badge bad">${esc(s.error)}</p>`;
   $('#detail-body').innerHTML = html;
@@ -253,31 +328,48 @@ async function renderDetail(id) {
 /* ---------------- 动作 ---------------- */
 $('#file-input').onchange = async (e) => {
   const files = [...e.target.files];
-  $('#upload-progress').textContent = `上传 ${files.length} 个…`;
+  if (!files.length) return;
+  const progress = $('#upload-progress');
+  progress.textContent = `正在上传 ${files.length} 个文件…`;
+  setNotice(`开始上传 ${files.length} 个样本`, 'info');
+  let completed = 0;
   for (const f of files) {
     try {
       const r = await api.upload(f);
-      $('#upload-progress').textContent = `已上传 ${f.name} (#${r.id})`;
+      completed += 1;
+      progress.textContent = `${completed}/${files.length} · ${f.name}${r.duplicate ? '（已存在）' : '（已登记）'}`;
     } catch (err) {
-      $('#upload-progress').textContent = `上传失败: ${err}`;
+      progress.textContent = `${completed}/${files.length} · ${f.name} 上传失败`;
+      setNotice(`${f.name} 上传失败：${err.message || err}`, 'error');
     }
   }
   e.target.value = '';
-  loadList(); loadStatus();
+  await loadList(); loadStatus();
+  if (completed === files.length) setNotice(`已处理 ${completed} 个样本`, 'success');
 };
 
-$('#btn-refresh').onclick = () => { loadList(); loadStatus(); };
+$('#btn-refresh').onclick = async () => {
+  const button = $('#btn-refresh');
+  setBusy(button, true, '刷新中…');
+  try { await Promise.all([loadList(), loadStatus()]); setNotice('样本库已刷新', 'success'); }
+  catch (error) { setNotice(`刷新失败：${error.message}`, 'error'); }
+  finally { setBusy(button, false); }
+};
 
 $('#btn-analyze').onclick = async () => {
   if (!current) return;
   const wf = $('#upload-workflow').value || 'full-auto';
-  $('#btn-analyze').disabled = true;
+  const button = $('#btn-analyze');
+  setBusy(button, true, '提交中…');
+  setNotice(`正在提交样本 #${current} 的 ${wf} 工作流…`, 'info');
   try {
     const r = await api.analyze(current, wf, false);
-    alert(`已提交工作流「${r.workflow}」分析(${r.stages.join(' → ')})。后台执行,可观察上方流水线进度。`);
-    setTimeout(() => { renderDetail(current); renderPipeline(current); }, 1000);
+    setNotice(`工作流已启动：${(r.stages || []).join(' → ')}`, 'success');
+    await Promise.all([renderDetail(current), renderPipeline(current), loadList()]);
+  } catch (error) {
+    setNotice(`分析未启动：${error.message}`, 'error');
   } finally {
-    $('#btn-analyze').disabled = false;
+    setBusy(button, false);
   }
 };
 
@@ -301,10 +393,18 @@ document.querySelectorAll('[data-graph-workflow]').forEach((button) => {
 
 $('#btn-disasm').onclick = async () => {
   if (!current) return;
-  const s = await api.get(current);
+  const button = $('#btn-disasm');
+  setBusy(button, true, '读取中…');
+  let s;
+  try { s = await api.get(current); } catch (error) {
+    setNotice(`无法读取样本：${error.message}`, 'error');
+    setBusy(button, false);
+    return;
+  }
   $('#disasm-panel').classList.remove('hidden');
   $('#disasm-addr').value = $('#disasm-addr').value || s.entry_point || '';
   await goDisasm();
+  setBusy(button, false);
 };
 
 async function goDisasm() {
@@ -322,7 +422,8 @@ async function goDisasm() {
     $('#view-samples').classList.remove('active');
     $('#disasm-panel').scrollIntoView({ behavior: 'smooth' });
   } catch (err) {
-    $('#disasm-out').textContent = '错误: ' + err;
+    $('#disasm-out').textContent = '错误: ' + (err.message || err);
+    setNotice(`反汇编失败：${err.message || err}`, 'error');
   }
 }
 $('#btn-go-disasm').onclick = goDisasm;
@@ -336,9 +437,17 @@ if ($('#btn-sample-output')) $('#btn-sample-output').onclick = () => openConfigu
 $('#btn-del').onclick = async () => {
   if (!current) return;
   if (!confirm('确认删除该样本及其分析记录?')) return;
-  await fetch(`/api/samples/${current}`, { method: 'DELETE' });
+  try {
+    await request(`/api/samples/${current}`, { method: 'DELETE' });
+  } catch (error) {
+    setNotice(`删除失败：${error.message}`, 'error');
+    return;
+  }
   current = null;
   $('#sample-detail').classList.add('hidden');
+  $('#overview-current-sample').textContent = '未选择';
+  $('#overview-current-meta').textContent = '从列表选择一个样本';
+  setNotice('样本已删除', 'success');
   loadList();
 };
 
@@ -418,22 +527,26 @@ function collectWorkflow() {
 if ($('#btn-wf-new')) $('#btn-wf-new').onclick = () => {
   const n = prompt('新工作流名称(英文/数字/中划线):', 'my-flow');
   if (!n) return;
-  api.wfCreate({ name: n }).then(r => { if (r.ok) { currentWfName = n; loadWorkflowUI(); } else alert('创建失败: ' + (r.detail || '')); });
+  api.wfCreate({ name: n }).then(r => { if (r.ok) { currentWfName = n; loadWorkflowUI(); setNotice(`工作流 ${n} 已创建`, 'success'); } })
+    .catch(error => setNotice(`创建工作流失败：${error.message}`, 'error'));
 };
 
 if ($('#btn-wf-save')) $('#btn-wf-save').onclick = async () => {
   const d = collectWorkflow();
-  if (!d.name) { alert('请填写工作流名称'); return; }
-  const r = await api.wfSave(d.name, d);
-  if (r.ok) { $('#wf-status').textContent = '✓ 已保存'; setTimeout(() => $('#wf-status').textContent = '', 2000); loadWorkflowUI(); }
-  else alert('保存失败: ' + (r.detail || ''));
+  if (!d.name) { setNotice('请填写工作流名称', 'error'); return; }
+  try {
+    const r = await api.wfSave(d.name, d);
+    if (r.ok) { $('#wf-status').textContent = '已保存'; setTimeout(() => $('#wf-status').textContent = '', 2000); loadWorkflowUI(); setNotice('工作流已保存', 'success'); }
+  } catch (error) { setNotice(`保存工作流失败：${error.message}`, 'error'); }
 };
 
 if ($('#btn-wf-del')) $('#btn-wf-del').onclick = async () => {
   const w = $('#wf-select').value;
   if (!confirm(`删除工作流「${w}」?`)) return;
-  const r = await api.wfDel(w);
-  if (r.ok) { currentWfName = 'full-auto'; loadWorkflowUI(); } else alert(r.detail || '删除失败');
+  try {
+    const r = await api.wfDel(w);
+    if (r.ok) { currentWfName = 'full-auto'; loadWorkflowUI(); setNotice('工作流已删除', 'success'); }
+  } catch (error) { setNotice(`删除工作流失败：${error.message}`, 'error'); }
 };
 
 if ($('#btn-wf-toggle')) $('#btn-wf-toggle').onclick = async () => {
@@ -694,7 +807,7 @@ $('#btn-ai-test').onclick = async () => {
   $('#ai-status').textContent = r.ok ? `✓ 连接成功: ${r.reply}` : `✗ ${r.error}`;
 };
 $('#btn-ai-summarize').onclick = async () => {
-  if (!current) { alert('请先选中样本'); return; }
+  if (!current) { setNotice('请先在样本库选择一个样本', 'error'); return; }
   $('#ai-chat-sample').value = current;
   await persistAiSessionSettings();
   $('#ai-prompt').value = '请基于当前样本给出结构化分析、关键证据和下一步工作流建议。';
@@ -796,7 +909,9 @@ async function loadEngineSpec(engine) {
     renderStageFlow(engEl(engine, 'stage-flow'), (spec.stages || []).map(s => ({
       name: s, title: (spec.titles || {})[s] || s, status: 'pending',
     })));
-  } catch (e) { /* noop */ }
+  } catch (e) {
+    engSet(engine, 'status', `<span class="badge bad">能力说明不可用</span> ${esc(e.message || e)}`);
+  }
 }
 
 function stagesFromStatus(engine, a) {
@@ -892,13 +1007,17 @@ function pollEngine(engine, id) {
         loadEngineHistory(engine);
         loadArtifactRuns({ preferred: { run_type: 'engine', engine, analysis_id: id }, force: true, silent: true });
       }
-    } catch (e) { /* noop */ }
+    } catch (e) {
+      engSet(engine, 'status', `<span class="badge bad">轮询失败</span> ${esc(e.message || e)}`);
+    }
   };
   tick();
   cfg.timer = setInterval(tick, 2500);
 }
 
 async function startEngineAnalysis(engine, body) {
+  const button = $(`#btn-${engine}-analyze`);
+  setBusy(button, true, '提交中…');
   engSet(engine, 'status', '提交分析…');
   try {
     const r = await api.engineAnalyze(engine, body);
@@ -911,7 +1030,9 @@ async function startEngineAnalysis(engine, body) {
       engSet(engine, 'status', `<span class="badge bad">启动失败</span> ${esc((r && (r.detail || r.error)) || JSON.stringify(r))}`);
     }
   } catch (e) {
-    engSet(engine, 'status', `<span class="badge bad">错误</span> ${esc(e)}`);
+    engSet(engine, 'status', `<span class="badge bad">错误</span> ${esc(e.message || e)}`);
+  } finally {
+    setBusy(button, false);
   }
 }
 
@@ -936,7 +1057,9 @@ async function loadEngineHistory(engine) {
         </td>
       </tr>`;
     }).join('');
-  } catch (e) { /* noop */ }
+  } catch (e) {
+    engEl(engine, 'history').innerHTML = `<tr><td colspan="6" class="table-state error">历史记录读取失败：${esc(e.message || e)}</td></tr>`;
+  }
 }
 
 async function viewEngineAnalysis(engine, id) {
@@ -944,7 +1067,9 @@ async function viewEngineAnalysis(engine, id) {
     const a = await api.engineGet(engine, id);
     updateEngineUI(engine, a);
     engEl(engine, 'result').scrollIntoView({ behavior: 'smooth' });
-  } catch (e) { /* noop */ }
+  } catch (e) {
+    engSet(engine, 'status', `<span class="badge bad">读取失败</span> ${esc(e.message || e)}`);
+  }
 }
 
 async function rerunEngineAnalysis(engine, id) {
@@ -952,7 +1077,7 @@ async function rerunEngineAnalysis(engine, id) {
     const r = await api.engineRerun(engine, id);
     if (r && r.ok) { engSet(engine, 'status', `已提交重跑 #${id}`); pollEngine(engine, id); }
     else engSet(engine, 'status', '重跑失败');
-  } catch (e) { engSet(engine, 'status', '重跑失败: ' + e); }
+  } catch (e) { engSet(engine, 'status', '重跑失败: ' + (e.message || e)); }
 }
 
 async function delEngineAnalysis(engine, id) {
@@ -962,7 +1087,7 @@ async function delEngineAnalysis(engine, id) {
     const cfg = engines[engine];
     if (cfg.id === id) { clearInterval(cfg.timer); cfg.timer = null; cfg.id = null; }
     loadEngineHistory(engine);
-  } catch (e) { /* noop */ }
+  } catch (e) { engSet(engine, 'status', `<span class="badge bad">删除失败</span> ${esc(e.message || e)}`); }
 }
 
 async function loadDumpPreviews(engine) {
@@ -992,7 +1117,7 @@ async function loadUE() {
       return `<option value="${esc(ver)}">UE ${esc(ver)}${eng ? ' (' + esc(eng) + ')' : ''}</option>`;
     }).join('');
     showUEVersion();
-  } catch (e) { /* noop */ }
+  } catch (e) { engSet('ue', 'status', `<span class="badge bad">版本列表不可用</span> ${esc(e.message || e)}`); }
 }
 
 async function showUEVersion() {
@@ -1008,7 +1133,7 @@ async function showUEVersion() {
       ['源码分支', esc((v.sources || {}).branch || '-')],
       ['说明', esc(v.note || '')],
     ].map(([k, x]) => `<b>${esc(k)}</b><span>${x}</span>`).join('');
-  } catch (e) { /* noop */ }
+  } catch (e) { $('#ue-version-info').innerHTML = `<span class="inline-state error">版本信息读取失败：${esc(e.message || e)}</span>`; }
 }
 
 $('#ue-version').onchange = showUEVersion;
@@ -1031,7 +1156,7 @@ $('#btn-ue-analyze').onclick = async () => {
       return;
     }
   }
-  if (!body.sample_id) { alert('请填写样本 ID,或选择上传 dump exe 文件'); return; }
+  if (!body.sample_id) { setNotice('请填写样本 ID，或选择上传 dump exe 文件', 'error'); return; }
   $('#ue-dump-file').value = '';
   startEngineAnalysis('ue', body);
 };
@@ -1101,7 +1226,7 @@ function renderUEResult(r) {
 /* ---------------- Unity 引擎分析 ---------------- */
 $('#btn-unity-analyze').onclick = async () => {
   const target_path = $('#unity-target').value.trim();
-  if (!target_path) { alert('请输入游戏文件夹绝对路径'); return; }
+  if (!target_path) { setNotice('请输入游戏文件夹绝对路径', 'error'); return; }
   const body = { target_path };
   const v = $('#unity-version').value.trim();
   if (v) body.version = v;
@@ -1824,19 +1949,29 @@ async function openConfiguredOutputRoot(feedback = $('#artifact-status')) {
 
 async function loadSettings() {
   try {
-    const s = await fetch('/api/settings').then(r => r.json());
+    const s = await request('/api/settings');
     $('#set-output-dir').value = s.output_dir || '';
-  } catch (e) { /* noop */ }
+  } catch (e) {
+    $('#set-status').textContent = `设置读取失败：${e.message || e}`;
+  }
   loadEnvironment();
 }
 
 $('#btn-set-save').onclick = async () => {
   const out = $('#set-output-dir').value.trim();
-  const r = await fetch('/api/settings', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ output_dir: out }),
-  }).then(r => r.json());
-  $('#set-status').textContent = r.ok ? `✓ 已保存 (${r.settings.output_dir})` : '保存失败';
-  if (r.ok) { loadEnvironment(); loadArtifactRuns(); }
+  const button = $('#btn-set-save');
+  setBusy(button, true, '保存中…');
+  try {
+    const r = await request('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ output_dir: out }),
+    });
+    $('#set-status').textContent = `已保存（${r.settings.output_dir}）`;
+    setNotice('输出目录设置已保存', 'success');
+    if (r.ok) { loadEnvironment(); loadArtifactRuns(); }
+  } catch (error) {
+    $('#set-status').textContent = `保存失败：${error.message}`;
+    setNotice(`输出目录保存失败：${error.message}`, 'error');
+  } finally { setBusy(button, false); }
   setTimeout(() => $('#set-status').textContent = '', 3000);
 };
 

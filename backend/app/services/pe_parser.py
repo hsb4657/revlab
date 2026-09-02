@@ -238,7 +238,8 @@ def parse_resources(pe):
     try:
         types = pe.DIRECTORY_ENTRY_RESOURCE.entries
         for t in types:
-            node = {"type": t.name if hasattr(t, "name") else t.struct.Id, "children": []}
+            resource_name = getattr(t, "name", None)
+            node = {"type": str(resource_name) if resource_name is not None else t.struct.Id, "children": []}
             try:
                 if t.struct.Id in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 24):
                     node["type"] = {1: "CURSOR", 2: "BITMAP", 3: "ICON", 4: "MENU", 5: "DIALOG",

@@ -54,6 +54,8 @@ class Runner:
             s.status = status
             if error:
                 s.error = error
+            elif status in ("analyzing", "analyzed"):
+                s.error = ""
             db.commit()
         finally:
             db.close()
@@ -310,8 +312,9 @@ class Runner:
                     db.close()
                 log.info("stage %s done for sample %s", st, self.sample_id)
         except Exception as e:
-            self._mark(sample.stage, "error", error=f"{e}\n{traceback.format_exc()}")
-            return {"ok": False, "error": str(e), "stage": sample.stage}
+            failed_stage = locals().get("st", sample.stage or "unknown")
+            self._mark(failed_stage, "error", error=f"{e}\n{traceback.format_exc()}")
+            return {"ok": False, "error": str(e), "stage": failed_stage}
 
         self._mark("report", "analyzed")
         db = SessionLocal()

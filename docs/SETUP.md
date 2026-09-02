@@ -1,102 +1,63 @@
-# Windows Setup
+# 设置与排错
 
-REVLab includes a repeatable Windows bootstrap. It creates one repository-local
-Python virtual environment, installs the backend and MCP dependencies, installs
-the Vue Flow editor dependencies, builds `frontend/wf-dist`, and prints a clear
-capability summary before the application is started.
+## 最小安装
 
-## Quick Start
-
-From the repository root, run:
+Windows 10/11、Python 3.10+ 和 `pip` 即可运行核心静态分析。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+scripts\start.bat
 ```
 
-Double-click users can run `scripts\setup.bat`, which forwards the same options
-to the PowerShell entrypoint.
+打开 <http://127.0.0.1:8000>。如果 8000 端口已被占用，请在启动脚本中改用其他端口。
 
-This core setup requires Python 3.10+ and Node.js 18+. It does not download
-large optional tools by default. Start REVLab after a successful setup with:
+## 可选能力
+
+| 能力 | 依赖 | 缺失时的行为 |
+| --- | --- | --- |
+| 反编译 | Java 21、Ghidra | 反编译阶段标记跳过，静态分析仍可用 |
+| UPX 解压 | `tools/upx/upx.exe` | 保留壳检测结果，不执行解压 |
+| 通用内存转储 | PE-sieve | 脱壳阶段返回工具缺失 |
+| 网络抓包 | Windows `pktmon`、管理员权限 | 样本可继续分析，但没有抓包产物 |
+| 动态分析 | VMware Workstation、可用快照 | 未配置时返回 `blocked_by_policy` |
+
+启动不会自动下载依赖。安装脚本或设置页的环境操作必须由用户显式触发。
+
+## 环境变量
+
+复制 `.env.example` 为 `.env`。核心设置如下：
+
+```text
+REVLAB_OUTPUT_DIR=D:\revlab-output
+REVLAB_SANDBOX_VM=1
+REVLAB_VM_VMX=D:\Lab\revlab.vmx
+REVLAB_VM_SNAPSHOT=clean
+REVLAB_VM_GUEST_PATH=C:\RevLab\sample.exe
+```
+
+没有 VMX 和快照时，保持 `REVLAB_SANDBOX_VM=0`。宿主机执行只有在明确设置 `REVLAB_ALLOW_HOST_EXECUTION=1` 后才会启用，这只适合隔离的实验机。
+
+远程 API 还需要 `REVLAB_API_TOKEN`，浏览器来源由 `REVLAB_CORS_ORIGINS` 控制。脚本节点和自定义命令同样默认关闭。
+
+## 常见问题
+
+### 页面能打开，但分析无法启动
+
+进入“设置”查看环境卡片。缺失能力会列出路径和补救方式；环境准备完成后重新提交工作流。
+
+### 动态阶段显示未执行
+
+这是预期的安全状态。只有 `REVLAB_SANDBOX_VM=1` 且 VMX、快照均有效时才会运行样本。界面不会把被策略阻止的执行显示为成功。
+
+### 报告或产物打不开
+
+确认输出目录可写，并在“统一产物中心”刷新运行清单。每个文件只能从本次运行登记的 manifest 打开或下载。
+
+## 验证
 
 ```powershell
-.\scripts\start.bat
+python -m unittest discover -s backend/tests -p "test*.py"
+python -m compileall -q backend mcp_server
 ```
 
-The main application is available at `http://127.0.0.1:8000/`. Open its
-**Workflow** page to use the embedded visual editor alongside preset switching,
-run history, live node states, and the artifact center. The `/wf/` route is the
-same editor surface used by the main application and is primarily useful for
-direct technical troubleshooting.
-
-## Complete Setup
-
-For a fresh Windows machine with `winget` available, use the complete command:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -All -PersistEnv
-```
-
-`-All` performs these operations in order:
-
-1. Installs missing Python 3.11, Node.js LTS, and OpenJDK 21 through `winget`.
-2. Creates or reuses `.venv`, then installs `backend/requirements.txt` and
-   `mcp_server/requirements.txt`.
-3. Runs `npm ci` for `frontend/workflow` and rebuilds `frontend/wf-dist`.
-4. Downloads the latest official Ghidra archive, verifies its SHA-256, and
-   installs it at `ghidra/runtime`.
-5. Downloads optional UPX and PE-sieve tooling.
-6. Runs Python compilation and the repository test suite.
-
-Ghidra is a large download. Use the core command when only the static and graph
-workflow capabilities are needed, then add Ghidra later with:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -InstallGhidra -PersistEnv
-```
-
-## Setup Options
-
-| Option | Effect |
-| --- | --- |
-| `-All` | Installs missing runtime prerequisites, Ghidra, optional PE tools, and runs verification. |
-| `-InstallPrerequisites` | Uses `winget` only when Python, Node.js, or a required JDK is missing. |
-| `-InstallGhidra` | Runs `scripts/install-ghidra.ps1`; Java 21 is checked first. |
-| `-InstallTools` | Downloads optional UPX and PE-sieve tooling. |
-| `-PersistEnv` | Stores the resolved `GHIDRA_HOME` in the current user's environment. |
-| `-Verify` | Runs `compileall` and `unittest discover -s backend/tests -v`. |
-| `-SkipPython` / `-SkipFrontend` | Skips one setup phase for troubleshooting. |
-| `-PythonExe` / `-NodeExe` | Uses an explicit executable path instead of PATH discovery. |
-
-The script is idempotent: it reuses `.venv`, package lockfiles, installed tools,
-and a valid Ghidra runtime. Runtime downloads and generated analysis artifacts
-are excluded from Git.
-
-## Configuration
-
-Copy `.env.example` to `.env` before using `scripts/start.ps1` if paths or
-dynamic-analysis defaults need to be changed. The launch script loads this file
-only into the application process; it never writes secrets or paths back to the
-repository.
-
-`scripts/start.ps1` does not install missing dependencies implicitly. After a
-fresh checkout run `scripts/setup.ps1`; only pass `-AutoSetup` or set
-`REVLAB_AUTO_SETUP=1` when you explicitly want the launcher to run the core
-bootstrap.
-
-AI provider configuration is intentionally stored through the web application's
-model settings panel. It is kept in local runtime data and is not committed.
-
-The checked-in `.env.example` keeps remote access, host execution, unsafe
-workflow nodes, and automatic dependency setup disabled. Enable them only for
-an isolated lab and set `REVLAB_API_TOKEN` before binding the web server to a
-non-loopback address. Ghidra, UPX, PE-sieve, Il2CppDumper, pktmon, and Node.js
-are optional capabilities; missing tools are reported per node instead of
-blocking the complete application.
-
-## Expected Capability Summary
-
-The setup summary always reports the resolved Python executable, Node.js
-version, Ghidra state, UPX state, and PE-sieve state. Missing optional tools are
-shown as warnings. A nonzero exit code indicates that a required setup phase or
-an explicitly requested optional installation did not complete.
+前端是静态文件；图工作流编辑器修改后，在 `frontend/workflow` 执行 `npm run build`。
