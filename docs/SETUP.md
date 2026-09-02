@@ -1,4 +1,6 @@
-# 安装和排错
+# 安装、配置和排错
+
+REVLab 的核心是“证据阶段 + 可选的 AI 操作员”。PE、UE 和 Unity 使用不同的分析器，但都通过同一个任务系统保存阶段状态、产物和 AI 工具轨迹。先把项目跑起来，再按手里的样本类型选择工作流；不要为了让界面显示“完成”而安装用不到的工具。
 
 ## 先运行起来
 
@@ -12,6 +14,16 @@ scripts\start.bat
 然后访问 <http://127.0.0.1:8000>。如果端口被占用，修改启动命令里的端口即可。
 
 只做 PE 静态分析时，不需要 Java、Ghidra、VMware 或管理员权限。设置页会列出本机已经找到的可选组件。
+
+### 按样本类型选择入口
+
+| 手里的文件 | 入口 | 第一轮会做什么 |
+| --- | --- | --- |
+| 单个 `.exe`/`.dll` | PE 分析 | 哈希、PE 头、节区、导入、字符串、壳线索 |
+| Unreal dump 后的 exe | UE 专项分析 | UE 家族/版本候选、三大件、FName、反射和加密线索 |
+| Unity 游戏目录 | Unity 专项分析 | Mono/IL2CPP 判定、GameAssembly、Metadata、资源和 SDK 门禁 |
+
+UE 和 Unity 不要求把文件复制到项目目录，使用绝对路径即可。分析结果会保存到配置的输出目录；原始样本保持不变。
 
 ## 可选工具
 
@@ -73,6 +85,24 @@ model = gpt-4o-mini
 AI 自动请求动态工具时必须有有效 VMware 快照。没有隔离 VM 时返回 `blocked_by_policy`，这表示没有发生执行；不要把这个状态解读成样本没有行为。
 
 ## 常见问题
+
+### AI 没有调用工具
+
+先确认 AI 配置中的 `enabled`、`base_url`、`api_key` 和 `model` 都已填写。然后检查节点输出：
+
+- `tool_trace` 有记录：模型已经进入工具循环，按记录查看它查过什么。
+- `tool_mode=unsupported_fallback`：当前兼容网关不接受 OpenAI `tools` 参数，节点只能根据已有证据回答。
+- `AI_WAITING`：没有可用的内部模型，需要用 MCP 读取证据并提交结论。
+
+有些模型会先给出一段解释再请求工具，这是正常的；后端只把真正执行成功的工具结果写入轨迹。模型没有调用 `pe_get_imports`，不代表导入表为空，只代表这一轮没有查它。
+
+### AI 给出的地址或行为能直接使用吗
+
+不能直接当作事实。UE 地址默认是 `candidate`/`ai_inferred`，要经过同构建运行时指针和 FName 解码验证。PE 导入 API、字符串和高熵节区只是线索。动态状态必须是实际执行返回的 `execution_status=completed`；`blocked_by_policy` 和 `not_collected` 都表示没有运行时观测。
+
+### Unity 为什么没有生成 SDK
+
+先看 `metadata_status`、`metadata_validation` 和 `delivery_complete`。Metadata 候选、文件名被改写或只修复了头部，都不会满足 SDK 门禁；需要结构解析通过，必要时还要提供构建匹配的运行时恢复证据。
 
 ### 点了分析但没有结果
 

@@ -1,8 +1,18 @@
 # REVLab
 
-REVLab 是一个在 Windows 本机运行的 PE 分析工作台。它把样本登记、静态解析、可选的反编译和动态分析拆成阶段，并把每个阶段的结果保存到样本记录中。这样做的目的很实际：同一个文件可以重复分析、比较不同工作流，也能从报告和产物目录回到原始证据。
+REVLab 是一个在 Windows 本机运行的二进制分析工作台，覆盖通用 PE、Unreal Engine dump 和 Unity 游戏目录。它把样本登记、结构解析、专项识别、可选的反编译/SDK 处理和受控动态分析拆成阶段，并把每个阶段的结果保存到样本记录中。这样做的目的很实际：同一个文件可以重复分析、比较不同工作流，也能从报告和产物目录回到原始证据。
 
-项目面向逆向工程学习、内部软件排查和实验室样本整理。它不是云端杀毒服务，不会替你判断文件是否安全，也不会把静态猜测包装成运行时结论。
+项目面向逆向工程学习、内部软件排查和实验室样本整理。它不是云端杀毒服务，不会替你判断文件是否安全，也不会把静态猜测包装成运行时结论。UE 的地址、Unity 的 Metadata 和 AI 的判断都保留来源与前置条件，方便你回到原始文件复核。
+
+## 从哪里开始
+
+如果只是想快速确认一个 exe，直接走“样本 → PE 静态分析 → 报告”。这条路径不运行样本，也不要求安装 Ghidra 或 VMware。
+
+如果手里的是 Unreal dump，选择 UE 专项分析并填写 dump 后的 exe。版本可以留空让程序从字符串和结构线索推断，也可以手动指定一个版本作为候选。三大件结果默认是候选 RVA；只有加载同构建进程、校验指针范围和 FName 解码后，才适合当作运行时地址使用。
+
+如果手里的是 Unity 游戏目录，填写包含 `GameAssembly.dll`、`UnityPlayer.dll` 或 `Data` 目录的绝对路径。程序会先区分 Mono/IL2CPP，再判断 `global-metadata.dat` 是否可解析。Metadata 没有通过结构验证时，SDK 阶段会停下来并说明缺什么，不会生成一个看似完整但不能用的 `Dump.cs`。
+
+AI 配置完成后，建议把对应的 AI 节点放在证据节点之后。AI 会根据当前样本决定是否继续查节区、导入、反汇编、UE 结构或 Unity Metadata；没有模型时则保留证据并等待 MCP 外部智能体。这样每个样本的分析路径由证据决定，而不是所有程序套同一份固定答案。
 
 ## 能做什么
 
@@ -119,6 +129,39 @@ Unity 页面接收游戏目录绝对路径，扫描 `globalgamemanagers`、`Unit
 MCP Server 适合 Codex、Claude Code、Cursor 等外部智能体。外部 AI 可以调用 `wf_task_outputs` 读取节点证据，自行调用 PE/UE/Unity 工具分析，再用 `wf_resolve_ai` 提交结论，最后用 `wf_retry_node` 继续原任务。外部 AI 和网页工作流共用数据库、样本路径检查、产物目录和动态执行策略。
 
 AI 自动请求 `dynamic_run` 时只允许已经配置快照的 VMware 环境。即使手工打开了 `REVLAB_ALLOW_HOST_EXECUTION=1`，AI 也不能自动在宿主机启动样本；宿主机执行仍需由用户走普通动态节点或接口明确触发。
+
+### 一个完整的 AI 取证回合
+
+下面是工具型 AI 可能走过的路径，实际工具数量和顺序取决于样本：
+
+```text
+AI: 先确认 PE 架构和入口点
+  -> pe_get_info
+AI: 入口位于可执行节，再检查壳和导入
+  -> pe_detect_packer
+  -> pe_get_imports
+AI: 发现 CreateFileW 只能说明程序具备调用能力，继续看入口指令
+  -> pe_disassemble_entry
+AI: 静态证据不足，申请动态观察
+  -> dynamic_run
+后端: execution_status=blocked_by_policy
+AI: 将“运行时行为”列为待验证假设，不写成已经发生的事实
+```
+
+工具调用记录在节点输出的 `tool_trace` 中。报告里的结论应该能回指到工具名或阶段名；如果只看到 `ai_inferred`、`candidate` 或 `blocked`，说明这部分还没有独立验证。完整的反编译文件、抓包文件和 Unity SDK 不放进提示词，而是通过产物清单和报告路径查看。
+
+### 用 MCP 接续一个等待中的任务
+
+当节点使用 `on_fail=external_wait` 时，可以让外部智能体接管：
+
+```text
+1. wf_task_outputs(task_id)      读取节点状态、evidence 和 tool_trace
+2. get_pe_info / ue_analyze / unity_analyze 等工具继续取证
+3. wf_resolve_ai(task_id, node_id, ai_result) 提交 JSON 结论
+4. wf_retry_node(task_id, node_id)             重新执行该 AI 节点
+```
+
+`wf_resolve_ai` 只写入当前任务的变量池，不会修改原始样本。外部 AI 提交的结果仍标记为 `ai_inferred`，报告不会把它自动升级成 `confirmed`。
 
 HTTP 模式：
 
