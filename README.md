@@ -4,11 +4,11 @@ REVLab 是一个在 Windows 本机运行的二进制分析工作台，覆盖通�
 
 项目面向逆向工程学习、内部软件排查和实验室样本整理。它不是云端杀毒服务，不会替你判断文件是否安全，也不会把静态猜测包装成运行时结论。UE 的地址、Unity 的 Metadata 和 AI 的判断都保留来源与前置条件，方便你回到原始文件复核。
 
-使用前请阅读 [免责声明与使用边界](DISCLAIMER.md)。REVLab 只适用于自有或明确获授权的样本和实验环境；未知样本的动态执行必须使用可恢复的隔离 VM。项目不会替你绕过许可、反作弊、访问控制或第三方服务限制，也不保证分析结果适用于所有构建。
+使用前请阅读 [免责声明与使用边界](DISCLAIMER.md)。REVLab 只适用于自有或明确获授权的样本和实验环境；本机动态执行前请确认你使用的是专用实验机或已接受相应风险。项目不会替你绕过许可、反作弊、访问控制或第三方服务限制，也不保证分析结果适用于所有构建。
 
 ## 从哪里开始
 
-如果只是想快速确认一个 exe，直接走“样本 → PE 静态分析 → 报告”。这条路径不运行样本，也不要求安装 Ghidra 或 VMware。
+如果只是想快速确认一个 exe，直接走“样本 → PE 静态分析 → 报告”。这条路径不运行样本，也不要求安装 Ghidra 或动态执行组件。
 
 如果手里的是 Unreal dump，选择 UE 专项分析并填写 dump 后的 exe。版本可以留空让程序从字符串和结构线索推断，也可以手动指定一个版本作为候选。三大件结果默认是候选 RVA；只有加载同构建进程、校验指针范围和 FName 解码后，才适合当作运行时地址使用。
 
@@ -48,7 +48,7 @@ AI 配置完成后，建议把对应的 AI 节点放在证据节点之后。AI �
 
 `dynamic` 阶段可以在受控环境中运行样本，收集进程树、子进程、文件变化、注册表变化和 DNS 线索；网络部分使用 Windows `pktmon` 转换为 pcap，再由项目内的解析器整理 DNS、HTTP、TLS SNI 和连接信息。
 
-默认策略是隔离优先且失败关闭：`REVLAB_DYNAMIC_BACKEND=auto` 会优先探测 Sandboxie-Plus，再探测 Windows Sandbox。自动模式不会启动 VMware，也不会因为找不到隔离后端而偷偷改用宿主机；两者都不可用时返回 `blocked_by_policy`。VMware 只能在节点里手动选择，宿主机执行还需要勾选“一次性允许宿主机执行”，AI 工具调用不能代替这个确认。Sandboxie-Plus 只通过 `Start.exe /box:REVLab /wait` 运行一次样本，不会自动安装或修改全局设置。
+动态分析统一使用本机受控执行，不再探测、启动或依赖 Sandboxie、Windows Sandbox、VMware 等后端。`REVLAB_DYNAMIC_BACKEND=local`（`auto` 也会兼容解析为 `local`）只会在当前用户明确勾选“确认本机执行(仅本次)”后启动样本；没有确认时返回 `blocked_by_policy`，不会创建进程。执行使用独立工作目录、有限超时和进程树终止，网络使用当前主机网络，风险由用户自行承担。
 
 ### 5. UE 和 Unity 页面
 
@@ -95,15 +95,15 @@ Unity 页面接收游戏目录绝对路径，扫描 `globalgamemanagers`、`Unit
 1. 读取当前样本的 PE 头和哈希，确认架构与入口点。
 2. 根据节区和入口特征决定是否继续查壳、导入表或字符串。
 3. 需要代码证据时调用入口反汇编，而不是只根据 API 名称猜行为。
-4. 如果模型认为静态证据不够，可以请求动态运行；后端仍会检查 VMware 策略。
+4. 如果模型认为静态证据不够，可以请求动态运行；后端会明确返回“需要用户确认”，不会由 AI 代替启动本机进程。
 5. 最终输出结论、引用过的工具、未确认项和下一步，并保留完整 `tool_trace`。
 
 不同目标会得到不同的工具集合：
 
 | 节点 | AI 可以调用的工具 | 主要用途 |
 | --- | --- | --- |
-| `pe_ai_assist` | PE 信息、节区、导入/导出、壳检测、字符串、入口反汇编、VM 动态运行 | 判断保护形态、行为线索和下一步逆向入口 |
-| `ue_ai_assist` | 全部 PE 工具、UE 版本/三大件/FName 专项分析、VM 动态运行 | 在当前 dump 中重新定位候选，比较反汇编证据，列出运行时校验要求 |
+| `pe_ai_assist` | PE 信息、节区、导入/导出、壳检测、字符串、入口反汇编、本机动态请求 | 判断保护形态、行为线索和下一步逆向入口 |
+| `ue_ai_assist` | 全部 PE 工具、UE 版本/三大件/FName 专项分析、本机动态请求 | 在当前 dump 中重新定位候选，比较反汇编证据，列出运行时校验要求 |
 | `unity_ai_assist` | Unity 目录扫描、程序集分析、Metadata 检查与验证 | 区分 Mono/IL2CPP，判断 Metadata 是否可用，以及 SDK 为什么完成或被阻止 |
 | `ai_analyze` | 根据当前任务类型开放上述工具 | 处理自定义问题和用户自己搭建的工作流 |
 
@@ -130,7 +130,7 @@ Unity 页面接收游戏目录绝对路径，扫描 `globalgamemanagers`、`Unit
 
 MCP Server 适合 Codex、Claude Code、Cursor 等外部智能体。外部 AI 可以调用 `wf_task_outputs` 读取节点证据，自行调用 PE/UE/Unity 工具分析，再用 `wf_resolve_ai` 提交结论，最后用 `wf_retry_node` 继续原任务。外部 AI 和网页工作流共用数据库、样本路径检查、产物目录和动态执行策略。
 
-AI 自动请求 `dynamic_run` 时只允许已经配置快照的 VMware 环境。即使手工打开了 `REVLAB_ALLOW_HOST_EXECUTION=1`，AI 也不能自动在宿主机启动样本；宿主机执行仍需由用户走普通动态节点或接口明确触发。
+AI 自动请求 `dynamic_run` 不能代替用户确认，因此只会返回 `blocked_by_policy`。需要运行时证据时，请在普通动态节点中明确勾选本机执行确认，再重新运行工作流。
 
 ### 一个完整的 AI 取证回合
 
@@ -204,7 +204,6 @@ scripts\start.bat
 | UPX | 已知 UPX 壳解压 |
 | PE-sieve | 进程内存转储和 IAT 修复 |
 | Windows pktmon | 网络采集 |
-| VMware Workstation | 快照隔离运行 |
 | Node.js + npm | 构建 Vue Flow 编辑器 |
 
 ## 配置文件
@@ -221,21 +220,8 @@ Copy-Item .env.example .env
 # 报告、抓包、脱壳和 SDK 的根目录；留空表示项目目录
 REVLAB_OUTPUT_DIR=D:\revlab-output
 
-# VMware 动态分析
-REVLAB_SANDBOX_VM=1
-REVLAB_VM_VMX=D:\Lab\revlab.vmx
-REVLAB_VM_SNAPSHOT=clean
-REVLAB_VM_GUEST_PATH=C:\RevLab\sample.exe
-
-# 动态后端：auto / sandboxie / windows_sandbox / vmware / host
-REVLAB_DYNAMIC_BACKEND=auto
-
-# 可选：Sandboxie-Plus Start.exe；留空时自动查找常见安装目录
-REVLAB_SANDBOXIE_START=
-REVLAB_SANDBOXIE_BOX=REVLab
-
-# 只在隔离实验机上显式打开宿主机执行
-REVLAB_ALLOW_HOST_EXECUTION=0
+# 动态后端：local（auto 仅为兼容别名）
+REVLAB_DYNAMIC_BACKEND=local
 
 # 远程 API（本机访问不需要令牌）
 REVLAB_API_TOKEN=
@@ -290,8 +276,8 @@ runs/                     图工作流运行目录
 - PE 结构正确不代表文件没有恶意行为；静态结果需要人工解释。
 - 高熵节区、导入函数和字符串只能提供线索，不能单独证明加壳、加密或联网行为。
 - 反汇编从入口点开始，不能替代完整反编译工程。
-- Ghidra、pktmon、VMware 等外部工具的可用性取决于本机配置和权限。
-- 动态分析若没有隔离环境会被策略阻止；项目不会自动替用户放宽策略。
+- Ghidra、pktmon 等外部工具的可用性取决于本机配置和权限。
+- 动态分析使用当前主机权限、文件系统和网络；没有本次用户确认会被策略阻止。
 - UE 地址、Unity Metadata 和 AI 输出都可能是候选结果，报告会保留证据等级和前置条件。
 - 输入路径、输出路径和产物打开操作会做边界检查，路径不存在或不在允许目录内时请求会失败。
 

@@ -4,7 +4,7 @@ The operator is deliberately small and auditable.  The model may request one
 of the read-only analysis tools below; REVLab executes it against the current
 sample, returns a bounded observation, and lets the model decide whether more
 evidence is needed.  Paths are pinned to the workflow target and dynamic
-execution is still governed by the normal sandbox policy.
+execution is still governed by the normal local-confirmation policy.
 """
 from __future__ import annotations
 
@@ -45,9 +45,9 @@ TOOL_DEFINITIONS = [
     _tool("unity_scan", "扫描当前 Unity 游戏目录、版本和 Mono/IL2CPP 构建证据。", {}, []),
     _tool("unity_analyze", "对当前 Unity 目录读取程序集、Metadata 和关键字符串证据。", {}, []),
     _tool("unity_metadata", "重新检查当前 Unity Metadata 状态和结构校验。", {}, []),
-    _tool("dynamic_run", "在隔离动态后端运行当前 PE；宿主机执行不对 AI 工具开放。", {
+    _tool("dynamic_run", "请求本机动态执行当前 PE；AI 不能代替用户确认，因此未确认时只返回阻止状态。", {
         "timeout": {"type": "integer", "minimum": 1, "maximum": 120},
-        "mode": {"type": "string", "enum": ["auto", "sandboxie", "windows_sandbox", "vmware"]},
+        "mode": {"type": "string", "enum": ["local"]},
     }),
 ]
 
@@ -144,36 +144,9 @@ def _execute_tool(name: str, args: dict, *, kind: str, target: str) -> dict:
             return {"ok": True, "tool": name, "decrypt": prior.get("decrypt"),
                     "assembly": prior.get("assembly"), "buildtype": prior.get("buildtype")}
         if name == "dynamic_run":
-            from ..core.config import config
-            # An AI-selected tool call is not human approval for host
-            # execution. Agentic dynamic runs can use an installed isolated
-            # runner, but never the separate manual host-execution escape hatch.
-            from . import sandbox
-            timeout = int(args.get("timeout", 60) or 60)
-            mode = str(args.get("mode") or "auto")
-            try:
-                runner = sandbox.create_sandbox(mode=mode, timeout=timeout)
-            except sandbox.SandboxError as exc:
-                return {"ok": True, "tool": name, "executed": False,
-                        "execution_status": "blocked_by_policy",
-                        "reason": str(exc), "capabilities": sandbox.sandbox_capabilities()}
-            if isinstance(runner, (sandbox.SandboxieRunner, sandbox.VMSandbox, sandbox.WindowsSandbox)):
-                if isinstance(runner, sandbox.SandboxieRunner):
-                    out = runner.run_and_capture(target, str(config.CAPTURES_DIR), config.SANDBOX_RUN_ARGS, timeout)
-                    runner_name = "sandboxie"
-                elif isinstance(runner, sandbox.WindowsSandbox):
-                    out = runner.run_and_capture(target, str(config.CAPTURES_DIR), config.SANDBOX_RUN_ARGS, timeout)
-                    runner_name = "windows_sandbox"
-                else:
-                    out = runner.run_and_capture(target, str(config.CAPTURES_DIR), config.SANDBOX_RUN_ARGS, timeout)
-                    runner_name = "vmware"
-                return {"ok": bool(out.get("ok", out.get("executed"))), "tool": name, "runner": runner_name,
-                        "executed": bool(out.get("ok", out.get("executed"))),
-                        "execution_status": out.get("execution_status") or ("completed" if out.get("ok") else "failed"),
-                        "result": out}
             return {"ok": True, "tool": name, "executed": False,
                     "execution_status": "blocked_by_policy",
-                    "reason": "当前 sandbox runner 不是受支持的隔离环境"}
+                    "reason": "AI 不能代替用户确认本机执行，请在动态节点中明确勾选确认"}
         return {"ok": False, "status": "unknown_tool", "error": name}
     except Exception as exc:
         return {"ok": False, "tool": name, "status": "tool_error", "error": str(exc)[:800]}

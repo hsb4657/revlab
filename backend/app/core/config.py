@@ -79,7 +79,9 @@ class Config:
     )
     API_TOKEN = os.environ.get("REVLAB_API_TOKEN", "")
     ENABLE_UNSAFE_NODES = os.environ.get("REVLAB_ENABLE_UNSAFE_NODES", "0") == "1"
-    ALLOW_HOST_EXECUTION = os.environ.get("REVLAB_ALLOW_HOST_EXECUTION", "0") == "1"
+    # Kept as a read-only compatibility field. It can no longer bypass the
+    # per-run confirmation required by the local dynamic runner.
+    ALLOW_HOST_EXECUTION = False
 
     ENABLE_GHIDRA = os.environ.get("REVLAB_ENABLE_GHIDRA", "1") == "1"
     # The repository installer uses this path by default; GHIDRA_HOME can
@@ -94,25 +96,12 @@ class Config:
         str(TOOLS_DIR / "unity-recovery" / "Il2CppDumper" / "Il2CppDumper"
             / "bin" / "Release" / "net8.0" / "Il2CppDumper.exe"),
     )
-    VMWARE_RUN = os.environ.get(
-        "VMWARE_RUN",
-        r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe",
-    )
     SANDBOX_TIMEOUT = int(os.environ.get("REVLAB_SANDBOX_TIMEOUT", "90"))
     SANDBOX_RUN_ARGS = os.environ.get("REVLAB_SANDBOX_ARGS", "")
-    USE_SANDBOX_VM = os.environ.get("REVLAB_SANDBOX_VM", "0") == "1"
-    VM_SNAPSHOT = os.environ.get("REVLAB_VM_SNAPSHOT", "")
-    VM_GUEST_PATH = os.environ.get("REVLAB_VM_GUEST_PATH", "C:\\RevLab\\sample.exe")
-    # Dynamic execution is fail-closed.  ``auto`` only selects a backend that
-    # is actually installed/configured; it never turns host execution on.
-    DYNAMIC_BACKEND = os.environ.get("REVLAB_DYNAMIC_BACKEND", "auto").strip().lower()
-    WINDOWS_SANDBOX_EXE = os.environ.get(
-        "REVLAB_WINDOWS_SANDBOX_EXE", r"C:\Windows\System32\WindowsSandbox.exe"
-    )
-    # Optional lightweight isolation. Sandboxie-Plus is detected locally and
-    # is never installed or started by REVLab.
-    SANDBOXIE_START = os.environ.get("REVLAB_SANDBOXIE_START", "").strip()
-    SANDBOXIE_BOX = os.environ.get("REVLAB_SANDBOXIE_BOX", "REVLab")
+    # Dynamic execution is always a local, user-confirmed run.  The legacy
+    # backend environment variable is retained as a compatibility input, but
+    # it cannot select a VM or third-party sandbox anymore.
+    DYNAMIC_BACKEND = os.environ.get("REVLAB_DYNAMIC_BACKEND", "local").strip().lower()
     CAPTURE_DURATION = int(os.environ.get("REVLAB_CAPTURE_DURATION", "30"))
 
 

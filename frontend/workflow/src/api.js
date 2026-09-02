@@ -20,7 +20,7 @@ export const api = {
   update: (id, b) => j('PUT', `/api/wf2/${id}`, b),
   remove: (id) => j('DELETE', `/api/wf2/${id}`),
   createTask: (wfid, b) => j('POST', `/api/wf2/${wfid}/tasks`, b || {}),
-  runTask: (wfid, tid) => j('POST', `/api/wf2/${wfid}/tasks/${tid}/run`),
+  runTask: (wfid, tid, confirmLocal = false) => j('POST', `/api/wf2/${wfid}/tasks/${tid}/run?confirm_local_execution=${confirmLocal}`),
   stopTask: (wfid, tid) => j('POST', `/api/wf2/${wfid}/tasks/${tid}/stop`),
   listTasks: (wfid) => j('GET', `/api/wf2/${wfid}/tasks?limit=100`),
   getTask: (wfid, tid) => j('GET', `/api/wf2/${wfid}/tasks/${tid}`),

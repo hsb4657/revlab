@@ -36,13 +36,13 @@ STAGE_META = {
         },
     },
     "dynamic": {
-        "title": "动态沙箱 & 网络抓包",
-        "desc": "受控运行,进程/文件/注册表监控,pktmon 抓包",
+        "title": "本机动态执行 & 网络抓包",
+        "desc": "用户确认后本机运行，监控进程/文件/注册表并可抓包",
         "params": {
             "timeout": {"label": "运行超时(秒)", "type": "int", "default": 60, "min": 5, "max": 600},
-            "backend": {"label": "动态后端", "type": "select", "default": "auto",
-                        "options": ["auto", "sandboxie", "windows_sandbox", "vmware", "host"]},
-            "confirm_host_execution": {"label": "确认宿主机执行(仅本次)", "type": "bool", "default": False},
+            "backend": {"label": "动态后端", "type": "select", "default": "local",
+                        "options": ["local"]},
+            "confirm_local_execution": {"label": "确认本机执行(仅本次)", "type": "bool", "default": False},
             "capture_duration": {"label": "抓包时长(秒)", "type": "int", "default": 30, "min": 5, "max": 600},
         },
     },
@@ -91,7 +91,7 @@ def init_default_workflows():
                     {"name": "unpack", "enabled": True, "params": {"memory_dump": False}},
                     {"name": "disassemble", "enabled": True, "params": {"max_insns": 5000}},
                     {"name": "decompile", "enabled": True, "params": {"max_functions": 200}},
-                    {"name": "dynamic", "enabled": False, "params": {"timeout": 60, "backend": "auto", "capture_duration": 30}},
+                    {"name": "dynamic", "enabled": False, "params": {"timeout": 60, "backend": "local", "confirm_local_execution": False, "capture_duration": 30}},
                     {"name": "report", "enabled": True, "params": {"formats": ["html", "json", "markdown"]}},
                 ]))
             db.commit()

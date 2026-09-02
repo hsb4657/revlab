@@ -12,11 +12,7 @@ const schema = computed(() => {
 })
 
 function optionLabel(value) {
-  return ({
-    auto: '自动选择隔离', sandboxie: 'Sandboxie-Plus（轻量）',
-    windows_sandbox: 'Windows Sandbox', vmware: 'VMware（手动）',
-    host: '宿主机（需确认）',
-  })[value] || value
+  return ({ local: '本机执行' })[value] || value
 }
 
 watch(selectedNode, (n) => {

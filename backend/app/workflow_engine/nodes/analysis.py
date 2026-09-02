@@ -350,9 +350,9 @@ class DynamicAnalyzeNode(BaseNode):
     category = "动态"
     params_schema = [
         {"key": "timeout", "label": "运行超时(秒)", "type": "number", "default": 60},
-        {"key": "backend", "label": "执行后端", "type": "select", "default": "auto",
-         "options": ["auto", "sandboxie", "windows_sandbox", "vmware", "host"]},
-        {"key": "confirm_host_execution", "label": "确认允许宿主机执行(仅本次)", "type": "bool", "default": False},
+        {"key": "backend", "label": "执行后端", "type": "select", "default": "local",
+         "options": ["local"]},
+        {"key": "confirm_local_execution", "label": "确认本机执行(仅本次)", "type": "bool", "default": False},
     ]
 
     async def execute(self, ctx) -> NodeResult:
@@ -364,7 +364,10 @@ class DynamicAnalyzeNode(BaseNode):
         try:
             runner = sandbox.create_sandbox(
                 mode=backend, timeout=timeout,
-                confirm_host_execution=bool(ctx["params"].get("confirm_host_execution", False)),
+                confirm_local_execution=bool(
+                    ctx["params"].get("confirm_local_execution")
+                    or ctx.get("pool", {}).get("__local_execution_confirmed", False)
+                ),
             )
         except sandbox.SandboxError as exc:
             return NodeResult(
@@ -375,40 +378,16 @@ class DynamicAnalyzeNode(BaseNode):
                     "capabilities": sandbox.sandbox_capabilities(),
                     "network": {"ok": False, "error": str(exc)},
                 },
-                summary="没有可用的隔离动态后端，未执行样本",
+                summary="未确认本机动态执行，未启动样本",
             )
         path = _sample_path(ctx["params"], ctx["pool"])
         if not path:
             return NodeResult(status="failed", error="无样本路径")
-        if isinstance(runner, sandbox.SandboxieRunner):
-            capture_dir = Path(ctx.get("output_dir") or config.OUTPUT_ROOT) / "captures"
-            result = runner.run_and_capture(path, str(capture_dir), config.SANDBOX_RUN_ARGS, timeout)
-            return NodeResult(status="success" if result.get("executed") else "failed",
-                              outputs={"runner": "sandboxie", "executed": bool(result.get("executed")),
-                                       "execution_status": result.get("execution_status", "failed"),
-                                       "result": result,
-                                       "network": {"ok": False, "status": "sandbox_policy"}},
-                              summary="Sandboxie 动态分析完成" if result.get("executed")
-                              else "Sandboxie 动态分析失败",
-                              error=result.get("error", ""))
-        if isinstance(runner, sandbox.VMSandbox):
-            capture_dir = Path(ctx.get("output_dir") or config.OUTPUT_ROOT) / "captures"
-            result = runner.run_and_capture(path, str(capture_dir),
-                                            config.SANDBOX_RUN_ARGS, timeout)
-            return NodeResult(status="success" if result.get("ok") else "failed",
-                              outputs={"runner": "vmware", "result": result},
-                              summary="VMware 动态分析完成",
-                              error=result.get("error", ""))
-        if isinstance(runner, sandbox.WindowsSandbox):
-            capture_dir = Path(ctx.get("output_dir") or config.OUTPUT_ROOT) / "captures"
-            result = runner.run_and_capture(path, str(capture_dir), config.SANDBOX_RUN_ARGS, timeout)
-            return NodeResult(status="success" if result.get("executed") else "failed",
-                              outputs={"runner": "windows_sandbox", "executed": bool(result.get("executed")),
-                                       "execution_status": result.get("execution_status", "failed"),
-                                       "result": result, "network": {"ok": True, "disabled": True}},
-                              summary="Windows Sandbox 短时动态分析完成" if result.get("executed")
-                              else "Windows Sandbox 动态分析失败",
-                              error=result.get("error", ""))
+        if not isinstance(runner, sandbox.LocalSandbox):
+            return NodeResult(status="failed", outputs={
+                "runner": "blocked", "executed": False,
+                "execution_status": "blocked_by_policy",
+            }, summary="当前策略只允许本机动态执行", error="unsupported dynamic backend")
         capture_dir = Path(ctx.get("output_dir") or config.OUTPUT_ROOT) / "captures"
         capture_dir.mkdir(parents=True, exist_ok=True)
         task_label = str(ctx.get("task_id") or "adhoc")

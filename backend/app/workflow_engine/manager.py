@@ -6,6 +6,7 @@ import json
 
 from ..core.database import SessionLocal
 from ..models.sample import GraphWorkflow, GraphTask, Sample
+from ..core.config import config
 from . import definition as dfn
 from .engine import start_engine
 
@@ -147,7 +148,13 @@ def create_task(wf_id: int, name: str = "", variables: dict = None,
         db.close()
 
 
-def run_task(task_id: int) -> dict:
+def _task_requires_local_execution(task: GraphTask) -> bool:
+    snapshot = task.definition_snapshot or {}
+    return any((node or {}).get("type") == "dynamic_analyze"
+               for node in (snapshot.get("nodes") or []))
+
+
+def run_task(task_id: int, confirm_local_execution: bool = False) -> dict:
     db = SessionLocal()
     try:
         task = db.query(GraphTask).filter(GraphTask.id == task_id).first()
@@ -155,6 +162,13 @@ def run_task(task_id: int) -> dict:
             raise ValueError("任务不存在")
         if task.status not in ("pending", "stopped", "failed"):
             raise ValueError(f"任务当前状态不允许启动: {task.status}")
+        if _task_requires_local_execution(task) and not bool(confirm_local_execution):
+            raise ValueError("任务包含本机动态执行，需要本次明确确认")
+        variables = dict(task.variables or {})
+        # This flag is written for this run only; it is reset on every start
+        # and is consumed by DynamicAnalyzeNode instead of saved node config.
+        variables["__local_execution_confirmed"] = bool(confirm_local_execution)
+        task.variables = variables
         task.cancel_requested = 0
         task.status = "pending"
         task.status_version = (task.status_version or 0) + 1
@@ -271,7 +285,7 @@ def init_builtin_templates():
                 _node("cond_dynamic", "是否需要内存转储", "condition", {}, 1320, 150),
                 _node("approval", "内存转储/动态分析确认", "approval", {"message": "确认开始内存转储或动态行为分析"}, 1580, 150),
                 _node("dynamic", "内存转储/动态行为分析", "dynamic_analyze", {
-                    "timeout": 60, "backend": "auto", "confirm_host_execution": False,
+                    "timeout": 60, "backend": "local", "confirm_local_execution": False,
                     "capture_network": True,
                     "capture_memory_dump": True, "dump_delay_seconds": 2,
                 }, 1840, 150),

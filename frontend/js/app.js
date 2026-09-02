@@ -44,8 +44,8 @@ const api = {
     fd.append('file', file);
     return request('/api/samples/upload', { method: 'POST', body: fd });
   },
-  analyze: (id, wf = 'full-auto', sync = false) =>
-    request(`/api/samples/${id}/analyze?workflow=${encodeURIComponent(wf)}&sync=${sync}`,
+  analyze: (id, wf = 'full-auto', sync = false, confirmLocal = false) =>
+    request(`/api/samples/${id}/analyze?workflow=${encodeURIComponent(wf)}&sync=${sync}&confirm_local_execution=${confirmLocal}`,
           { method: 'POST' }),
   disasm: (id, addr, n) =>
     request(`/api/samples/${id}/disassembly?addr=${encodeURIComponent(addr)}&max_insns=${n}`),
@@ -141,18 +141,15 @@ function loadStatus() {
     const backends = dynamicCaps.backends || {};
     const tags = [
       ['Ghidra', s.ghidra], ['UPX', s.upx], ['PE-sieve', s.pe_sieve],
-      ['Sandboxie', backends.sandboxie?.available],
-      ['Windows Sandbox', backends.windows_sandbox?.available],
-      ['VMware', s.vmware], ['pktmon', true]
+      ['本机执行', backends.local?.available], ['pktmon', true]
     ].map(([n, ok]) => `<span class="pkt">${n} ${ok ? '✓' : '✗'}</span>`).join('');
-    $('#sys-status').innerHTML = `沙箱:${s.sandbox_mode} ${tags}`;
+    $('#sys-status').innerHTML = `动态:${s.sandbox_mode} ${tags}`;
     const env = $('#overview-environment');
     const envMeta = $('#overview-environment-meta');
     const dynamic = $('#overview-dynamic-policy');
     const dynamicMeta = $('#overview-dynamic-meta');
     const labels = {
-      sandboxie: '轻量隔离', windows_sandbox: 'Windows Sandbox',
-      vmware: 'VMware（手动）', host: '宿主机', blocked: '未执行'
+      local: '本机执行', blocked: '未执行'
     };
     if (env) env.textContent = s.environment_ready ? '已就绪' : '待配置';
     if (envMeta) envMeta.textContent = s.environment_ready ? '核心分析能力可用' : `缺少 ${(s.environment_missing || []).length} 项能力`;
@@ -324,9 +321,9 @@ async function renderDetail(id) {
   html += `<h3>动态</h3><p>${dynSkipped
     ? '<span class="badge info">未纳入工作流</span> 当前运行使用静态分析工作流。'
     : dynBlocked
-    ? '<span class="badge warn">未执行</span> ' + esc(dyn.message || '当前策略禁止宿主机执行，需先配置隔离 VM。')
+    ? '<span class="badge warn">未执行</span> ' + esc(dyn.message || '本机运行需要先确认。')
     : dyn.error ? '<span class="badge bad">' + esc(dyn.error) + '</span>'
-    : '运行 ' + ((dyn.run || {}).ran_seconds || '-') + 's,新增进程 ' + (((dyn.run || {}).behavior || {}).new_processes || []).length + ' 个'}</p>`;
+    : '本机运行 ' + ((dyn.run || {}).ran_seconds || '-') + 's,新增进程 ' + (((dyn.run || {}).behavior || {}).new_processes || []).length + ' 个'}</p>`;
 
   if (s.error) html += `<p class="badge bad">${esc(s.error)}</p>`;
   $('#detail-body').innerHTML = html;
@@ -366,11 +363,19 @@ $('#btn-refresh').onclick = async () => {
 $('#btn-analyze').onclick = async () => {
   if (!current) return;
   const wf = $('#upload-workflow').value || 'full-auto';
+  const confirmLocal = wf === 'static-only' ? false : window.confirm(
+    '该工作流可能包含动态阶段。是否确认本次在当前主机运行样本？\n\n'
+    + '本机执行会使用当前用户权限、文件系统和网络，超时后才会终止进程。'
+  );
+  if (wf !== 'static-only' && !confirmLocal) {
+    setNotice('已取消：未确认本机动态执行', 'info');
+    return;
+  }
   const button = $('#btn-analyze');
   setBusy(button, true, '提交中…');
   setNotice(`正在提交样本 #${current} 的 ${wf} 工作流…`, 'info');
   try {
-    const r = await api.analyze(current, wf, false);
+    const r = await api.analyze(current, wf, false, confirmLocal);
     setNotice(`工作流已启动：${(r.stages || []).join(' → ')}`, 'success');
     await Promise.all([renderDetail(current), renderPipeline(current), loadList()]);
   } catch (error) {
@@ -484,7 +489,7 @@ async function renderWorkflowEditor() {
       const val = (st.params || {})[k];
       if (v.type === 'bool') return `<label><input type="checkbox" data-wf-param="${k}" ${val ? 'checked' : ''}>${esc(v.label)}</label>`;
       if (v.type === 'multi') return `<label>${esc(v.label)} <input type="text" data-wf-param="${k}" value="${esc((val || []).join(','))}"></label>`;
-      if (v.type === 'select') return `<label>${esc(v.label)} <select data-wf-param="${k}">${(v.options || []).map(o => `<option value="${esc(o)}" ${String(o) === String(val ?? v.default) ? 'selected' : ''}>${esc({auto: '自动选择隔离', sandboxie: 'Sandboxie-Plus（轻量）', windows_sandbox: 'Windows Sandbox', vmware: 'VMware（手动）', host: '宿主机（需确认）'}[o] || o)}</option>`).join('')}</select></label>`;
+      if (v.type === 'select') return `<label>${esc(v.label)} <select data-wf-param="${k}">${(v.options || []).map(o => `<option value="${esc(o)}" ${String(o) === String(val ?? v.default) ? 'selected' : ''}>${esc({local: '本机执行'}[o] || o)}</option>`).join('')}</select></label>`;
       return `<label>${esc(v.label)} <input type="number" data-wf-param="${k}" value="${esc(val ?? v.default)}" min="${v.min}" max="${v.max}"></label>`;
     }).join('');
     return `<div class="wf-stage">
@@ -1512,7 +1517,7 @@ const MCP_TOOLS = [
   ['detect_packer', '壳/加密封装检测'],
   ['unpack_known', '已知壳自动解压'],
   ['decompile_ghidra', 'Ghidra 反编译'],
-  ['run_dynamic', '沙箱运行 + 行为监控'],
+  ['run_dynamic', '本机确认后运行 + 行为监控'],
   ['capture_network', '网络抓包 + pcap 解析'],
   ['generate_report', '生成分析报告'],
   ['run_pipeline', '运行全自动工作流'],

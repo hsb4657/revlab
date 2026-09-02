@@ -77,7 +77,10 @@ def wf2_create_task(wf_id: int, payload: dict = None):
 
 
 @router.post("/{wf_id}/tasks/{task_id}/run")
-def wf2_run_task(wf_id: int, task_id: int):
+def wf2_run_task(wf_id: int, task_id: int,
+                 confirm_local_execution: bool = Query(
+                     False, description="确认本次允许本机动态执行"
+                 )):
     t = wfm.get_task(task_id)
     if not t or t["workflow_id"] != wf_id:
         raise HTTPException(404, "task not found")
@@ -93,7 +96,7 @@ def wf2_run_task(wf_id: int, task_id: int):
             },
         )
     try:
-        return wfm.run_task(task_id)
+        return wfm.run_task(task_id, confirm_local_execution=confirm_local_execution)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
 

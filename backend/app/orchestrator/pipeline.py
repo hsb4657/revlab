@@ -182,7 +182,7 @@ class Runner:
             sb = sandbox_svc.create_sandbox(
                 mode=backend,
                 timeout=timeout,
-                confirm_host_execution=bool(p.get("confirm_host_execution", False)),
+                confirm_local_execution=bool(p.get("confirm_local_execution", False)),
             )
         except sandbox_svc.SandboxError as exc:
             return {
@@ -198,26 +198,12 @@ class Runner:
             # pktmon is a Windows optional capability. The sample can still
             # run when it is unavailable; the result will report no capture.
             need_admin = True
+        if not isinstance(sb, sandbox_svc.LocalSandbox):
+            return {"sandbox": "blocked", "executed": False,
+                    "execution_status": "blocked_by_policy", "network": net,
+                    "error": "当前策略只允许本机动态执行"}
         monitor = sandbox_svc.BehaviorMonitor(watch_dirs=[str(Path(path).parent)])
-        if isinstance(sb, sandbox_svc.SandboxieRunner):
-            run = sb.run_and_capture(path, str(config.CAPTURES_DIR),
-                                     config.SANDBOX_RUN_ARGS, timeout=timeout)
-            return {"sandbox": "sandboxie", "run": run,
-                    "network": {"ok": False, "status": "sandbox_policy"},
-                    "execution_status": run.get("execution_status", "failed"),
-                    "error": "" if run.get("executed") else run.get("error", "")}
-        if isinstance(sb, sandbox_svc.VMSandbox):
-            run = sb.run_and_capture(path, str(config.UNPACKED_DIR),
-                                     config.SANDBOX_RUN_ARGS, timeout=timeout)
-            return {"sandbox": "vmware", "run": run, "network": net,
-                    "error": "" if run.get("ok") else run.get("error", "")}
-        if isinstance(sb, sandbox_svc.WindowsSandbox):
-            run = sb.run_and_capture(path, str(config.CAPTURES_DIR),
-                                     config.SANDBOX_RUN_ARGS, timeout=timeout)
-            return {"sandbox": "windows_sandbox", "run": run,
-                    "network": {"ok": True, "disabled": True},
-                    "execution_status": run.get("execution_status", "failed"),
-                    "error": "" if run.get("executed") else run.get("error", "")}
+        sb.monitor = monitor
         capture = pcap_svc.start_capture_session(pcap_path) if not need_admin else None
         run = sb.run(path, config.SANDBOX_RUN_ARGS)
         if capture:

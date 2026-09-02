@@ -2,7 +2,7 @@
 
 REVLab 的核心是“证据阶段 + 可选的 AI 操作员”。PE、UE 和 Unity 使用不同的分析器，但都通过同一个任务系统保存阶段状态、产物和 AI 工具轨迹。先把项目跑起来，再按手里的样本类型选择工作流；不要为了让界面显示“完成”而安装用不到的工具。使用前请阅读仓库根目录的 [免责声明与使用边界](../DISCLAIMER.md)。
 
-不要在生产机或日常办公机上运行未知样本。动态分析前准备专用 VMware 快照、隔离网络、可恢复备份和最小权限账号；没有这些条件时保持默认的 `blocked_by_policy`。报告、抓包和 AI 请求可能包含敏感信息，分享前请脱敏。
+不要在生产机或日常办公机上运行未知样本。本项目当前动态分析只支持本机受控执行，不提供沙箱或虚拟机隔离；请使用专用实验机、可恢复备份和最小权限账号。没有用户本次确认时保持 `blocked_by_policy`。报告、抓包和 AI 请求可能包含敏感信息，分享前请脱敏。
 
 ## 先运行起来
 
@@ -15,7 +15,7 @@ scripts\start.bat
 
 然后访问 <http://127.0.0.1:8000>。如果端口被占用，修改启动命令里的端口即可。
 
-只做 PE 静态分析时，不需要 Java、Ghidra、VMware 或管理员权限。设置页会列出本机已经找到的可选组件。
+只做 PE 静态分析时，不需要 Java、Ghidra 或管理员权限。设置页会列出本机已经找到的可选组件。
 
 ### 按样本类型选择入口
 
@@ -35,7 +35,7 @@ UE 和 Unity 不要求把文件复制到项目目录，使用绝对路径即可�
 | UPX 解压 | `tools/upx/upx.exe` | 只保留壳检测结果 |
 | PE-sieve 转储 | `tools/pe-sieve/pe-sieve64.exe` | 转储步骤报告工具缺失 |
 | 网络抓包 | Windows `pktmon`、管理员权限 | 没有网络产物，静态分析不受影响 |
-| 动态分析 | VMware、VMX 文件、快照 | 直接返回 `blocked_by_policy` |
+| 动态分析 | 专用实验机 + 本次用户确认 | 未确认时返回 `blocked_by_policy` |
 
 安装脚本可以准备部分工具，但不会在服务启动时自动下载。大文件工具也可以手动安装后，在 `.env` 中填写路径。
 
@@ -53,24 +53,12 @@ Copy-Item .env.example .env
 # 报告和运行产物的根目录。留空表示项目目录。
 REVLAB_OUTPUT_DIR=D:\revlab-output
 
-# 动态后端。auto 优先使用 Sandboxie-Plus，其次 Windows Sandbox；不会自动启动 VMware。
-REVLAB_DYNAMIC_BACKEND=auto
+# 动态后端。当前只支持本机受控执行；auto 是兼容别名。
+REVLAB_DYNAMIC_BACKEND=local
 
-# 可选：Sandboxie-Plus 的 Start.exe（留空自动探测）
-REVLAB_SANDBOXIE_START=
-REVLAB_SANDBOXIE_BOX=REVLab
-
-# VMware 动态分析（可选，三个值需要和实际虚拟机一致）。
-REVLAB_SANDBOX_VM=1
-REVLAB_VM_VMX=D:\Lab\revlab.vmx
-REVLAB_VM_SNAPSHOT=clean
-REVLAB_VM_GUEST_PATH=C:\RevLab\sample.exe
-
-# 宿主机执行只用于隔离实验机，默认关闭。
-REVLAB_ALLOW_HOST_EXECUTION=0
 ```
 
-不需要虚拟机时保持默认 `auto` 即可。Sandboxie-Plus 或 Windows Sandbox 都不可用时，动态节点会明确显示“未执行”，不会自动启动 VMware。确需验证时，可手动选择已配置的 VMware；宿主机执行必须在动态节点勾选一次性确认，AI 节点不能代替这个确认。宿主机执行会使用当前用户权限、网络和文件系统，只适合专用隔离实验机。Sandboxie-Plus 可从 winget 安装：`winget install --id Sandboxie.Plus`，安装动作由用户自行确认，REVLab 不会替你安装。
+动态节点选择“本机执行”并勾选“确认本机执行(仅本次)”后才会启动样本；执行使用当前用户权限、网络和文件系统，超时会终止进程树。AI 节点不能代替这个确认，也不会自动启动样本。项目不会安装或启动任何第三方沙箱、虚拟机或内核驱动。
 
 远程 API 还需要 `REVLAB_API_TOKEN`，允许的浏览器来源写在 `REVLAB_CORS_ORIGINS`。脚本节点和命令节点分别由 `REVLAB_ENABLE_UNSAFE_NODES` 控制。
 
@@ -91,7 +79,7 @@ model = gpt-4o-mini
 
 没有配置模型时，建议保留 `on_fail=external_wait`。工作流会把当前证据保存为 `revlab.ai-evidence/v1`，然后等待 MCP 智能体通过 `wf_task_outputs` 读取、调用工具并用 `wf_resolve_ai` 提交结论。`skip` 适合只想跑静态阶段的任务，`abort` 适合把 AI 设为硬性门禁。
 
-AI 自动请求动态工具时必须有有效 VMware 快照。没有隔离 VM 时返回 `blocked_by_policy`，这表示没有发生执行；不要把这个状态解读成样本没有行为。
+AI 自动请求动态工具时始终需要人工确认；工具返回 `blocked_by_policy` 表示没有发生执行，不要把这个状态解读成样本没有行为。
 
 ## 常见问题
 
@@ -119,7 +107,7 @@ AI 自动请求动态工具时必须有有效 VMware 快照。没有隔离 VM �
 
 ### 动态阶段显示 `blocked_by_policy`
 
-这是安全策略的正常结果，表示当前没有可用的隔离执行环境。配置有效的 VMware VMX 和快照后重新提交工作流即可。
+这是安全策略的正常结果，表示本次没有得到本机执行确认。勾选动态节点的确认项后重新提交工作流即可。
 
 ### 报告生成了但打不开
 

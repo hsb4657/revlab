@@ -103,11 +103,6 @@ def inspect_environment() -> dict:
             "path": str(config.IL2CPP_DUMPER_PATH),
             "remedy": "official Perfare/Il2CppDumper source build with DummyDll enabled",
         },
-        {
-            "key": "vmware", "name": "VMware runtime",
-            "ready": Path(config.VMWARE_RUN).exists(), "required": False,
-            "path": str(config.VMWARE_RUN), "remedy": "optional: local sandbox remains available",
-        },
     ]
     missing = [item["key"] for item in checks if item["required"] and not item["ready"]]
     with _lock:

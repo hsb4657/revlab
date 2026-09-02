@@ -98,7 +98,10 @@ def get_sample(sample_id: int, db: Session = Depends(get_db)):
 
 @router.post("/samples/{sample_id}/analyze")
 def trigger_analyze(sample_id: int, workflow: str = Query("full-auto", description="工作流名"),
-                    sync: bool = Query(False, description="等待完成(动态/反编译较慢)")):
+                    sync: bool = Query(False, description="等待完成(动态/反编译较慢)"),
+                    confirm_local_execution: bool = Query(
+                        False, description="确认本次允许本机动态执行"
+                    )):
     from ..core.database import SessionLocal
     db = SessionLocal()
     try:
@@ -110,6 +113,12 @@ def trigger_analyze(sample_id: int, workflow: str = Query("full-auto", descripti
     wf = wf_svc.get_workflow(workflow) or wf_svc.default_workflow()
     if not wf.get("enabled", True):
         raise HTTPException(400, f"workflow '{workflow}' is disabled")
+    if confirm_local_execution:
+        import copy
+        wf = copy.deepcopy(wf)
+        for stage in wf.get("stages", []):
+            if stage.get("name") == "dynamic":
+                stage.setdefault("params", {})["confirm_local_execution"] = True
     _require_execution_environment()
     if sync:
         from ..orchestrator.pipeline import Runner
@@ -135,6 +144,15 @@ def create_sample_graph_run(sample_id: int, payload: dict):
     if not workflow_id:
         raise HTTPException(400, "workflow_id is required")
     try:
+        workflow_def = graph_manager.get_workflow(workflow_id)
+        if not workflow_def:
+            raise HTTPException(404, "workflow not found")
+        has_dynamic = any(
+            (node or {}).get("type") == "dynamic_analyze"
+            for node in (workflow_def.get("nodes") or [])
+        )
+        if payload.get("start", True) and has_dynamic and not payload.get("confirm_local_execution", False):
+            raise HTTPException(400, "任务包含本机动态执行，需要本次明确确认")
         if payload.get("start", True):
             _require_execution_environment()
         created = graph_manager.create_task(
@@ -144,7 +162,10 @@ def create_sample_graph_run(sample_id: int, payload: dict):
             sample_id=sample_id,
         )
         if payload.get("start", True):
-            graph_manager.run_task(created["id"])
+            graph_manager.run_task(
+                created["id"],
+                confirm_local_execution=bool(payload.get("confirm_local_execution", False)),
+            )
         return {**created, "sample_id": sample_id, "status": "started" if payload.get("start", True) else "pending"}
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -235,11 +256,11 @@ def status():
     from ..services import sandbox
     environment = inspect_environment()
     capabilities = sandbox.sandbox_capabilities()
-    vm_configured = capabilities["backends"]["vmware"]["available"]
     selected_backend = capabilities["selected"]
     dynamic_execution = {
-        "allowed": selected_backend != "blocked",
+        "allowed": True,
         "mode": selected_backend,
+        "requires_confirmation": bool(capabilities.get("requires_confirmation")),
         "reason": capabilities["message"],
         "capabilities": capabilities,
     }
@@ -248,10 +269,10 @@ def status():
         "ghidra": bool(ghidra_available()) and find_ghidra_home(),
         "upx": Path(config.UPX_PATH).exists(),
         "pe_sieve": Path(config.PESIEVE_PATH).exists(),
-        "vmware": Path(config.VMWARE_RUN).exists(),
+        "vmware": False,
         "pktmon": True,
         "sandbox_mode": selected_backend,
-        "host_execution_allowed": bool(config.ALLOW_HOST_EXECUTION),
+        "host_execution_allowed": False,
         "dynamic_execution": dynamic_execution,
         "stages": wf_svc.DEFAULT_STAGE_ORDER,
         "environment_ready": environment["ready"],

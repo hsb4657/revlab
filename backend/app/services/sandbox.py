@@ -1,15 +1,11 @@
-﻿"""沙箱抽象层:VMware 快照回滚 / 本地受控运行 + 动态行为监控"""
+"""本机受控动态执行与行为监控。"""
 import datetime
 import ctypes
-import json
 import os
 import shlex
-import shutil
 import subprocess
 import threading
 import time
-import uuid
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import psutil
@@ -210,304 +206,17 @@ class LocalSandbox:
         self.monitor.stop()
         self.result = {
             "ok": True,
+            "executed": True,
+            "execution_status": "timeout" if rc == "timeout" else "completed",
+            "runner": "local",
             "pid": pid,
             "returncode": rc,
             "ran_seconds": ran_seconds,
+            "network_policy": "host_network",
             "behavior": self.monitor.summary(),
             "startup_observer": startup_observer,
         }
         return self.result
-
-
-def _sandboxie_start_path() -> Path | None:
-    """Find Sandboxie-Plus without changing machine state."""
-    configured = str(getattr(config, "SANDBOXIE_START", "") or "").strip()
-    candidates = [Path(configured)] if configured else []
-    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
-    program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    for root in (program_files, program_files_x86):
-        candidates.extend((
-            Path(root) / "Sandboxie-Plus" / "Start.exe",
-            Path(root) / "Sandboxie" / "Start.exe",
-        ))
-    found = shutil.which("Start.exe")
-    if found:
-        candidates.append(Path(found))
-    for candidate in candidates:
-        try:
-            if candidate.is_file():
-                return candidate.resolve()
-        except OSError:
-            continue
-    return None
-
-
-class SandboxieRunner:
-    """Small Sandboxie-Plus adapter for a bounded one-shot run.
-
-    Sandboxie owns the isolation boundary. REVLab only starts the sample with
-    ``/wait`` and terminates the named box on timeout; it never starts a VM or
-    changes Sandboxie settings globally.
-    """
-
-    backend = "sandboxie"
-
-    def __init__(self, timeout: int = 60):
-        self.timeout = max(1, min(int(timeout or 60), 600))
-        self.start_exe = _sandboxie_start_path()
-        if not self.start_exe:
-            raise SandboxError(
-                "Sandboxie-Plus is not installed; install it or choose another backend"
-            )
-        self.box_name = str(getattr(config, "SANDBOXIE_BOX", "REVLab") or "REVLab")
-
-    def _terminate_box(self) -> None:
-        try:
-            subprocess.run(
-                [str(self.start_exe), f"/box:{self.box_name}", "/terminate"],
-                capture_output=True, timeout=30,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-
-    def run_and_capture(self, host_sample: str, host_result_dir: str,
-                        run_args: str = "", timeout: int | None = None) -> dict:
-        if timeout is not None:
-            self.timeout = max(1, min(int(timeout or self.timeout), 600))
-        sample = Path(host_sample)
-        if not sample.is_file():
-            return {"ok": False, "executed": False, "execution_status": "failed",
-                    "runner": self.backend, "error": f"sample not found: {host_sample}"}
-        result_dir = Path(host_result_dir)
-        result_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            args = _split_process_args(str(run_args or ""))
-        except ValueError as exc:
-            return {"ok": False, "executed": False, "execution_status": "failed",
-                    "runner": self.backend, "error": f"invalid sandbox arguments: {exc}"}
-        monitor = BehaviorMonitor(watch_dirs=[str(result_dir)])
-        command = [str(self.start_exe), f"/box:{self.box_name}", "/wait", str(sample), *args]
-        started = time.time()
-        monitor.start()
-        process = None
-        try:
-            process = subprocess.Popen(
-                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            try:
-                process.wait(timeout=self.timeout)
-                execution_status = "completed"
-                returncode = process.returncode
-            except subprocess.TimeoutExpired:
-                self._terminate_box()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                execution_status = "timeout"
-                returncode = "timeout"
-            time.sleep(0.5)
-            return {
-                "ok": True,
-                "executed": True,
-                "execution_status": execution_status,
-                "runner": self.backend,
-                "box": self.box_name,
-                "returncode": returncode,
-                "ran_seconds": round(time.time() - started, 1),
-                "behavior": monitor.summary(),
-            }
-        except (OSError, subprocess.SubprocessError) as exc:
-            return {"ok": False, "executed": False, "execution_status": "failed",
-                    "runner": self.backend, "error": str(exc)}
-        finally:
-            monitor.stop()
-
-
-class WindowsSandbox:
-    """Ephemeral Windows Sandbox runner with networking disabled.
-
-    The sandbox is deliberately self-contained: the input is copied into a
-    read-only mapped folder, only a small output folder is writable, and the
-    guest shuts itself down after the bounded run.  The class is optional and
-    reports a capability error when the Windows Sandbox feature is absent.
-    """
-
-    backend = "windows_sandbox"
-
-    def __init__(self, timeout: int = 60):
-        self.timeout = max(1, min(int(timeout or 60), 600))
-        self.executable = Path(config.WINDOWS_SANDBOX_EXE)
-        if not self.executable.exists():
-            raise SandboxError(
-                "Windows Sandbox is not installed; enable the Containers-DisposableClientVM feature"
-            )
-
-    @staticmethod
-    def _ps_quote(value: str) -> str:
-        return "'" + str(value).replace("'", "''") + "'"
-
-    def _write_guest_script(self, path: Path, guest_sample: str, args: str) -> None:
-        # The script emits JSON into the mapped output folder and then powers
-        # off the disposable guest, which lets the host wait without a GUI.
-        sample = self._ps_quote(guest_sample)
-        arg_string = self._ps_quote(args or "")
-        timeout_ms = self.timeout * 1000
-        script = f"""$ErrorActionPreference = 'Continue'
-$out = 'C:\\RevLab\\Output'
-$sample = {sample}
-$argString = {arg_string}
-$before = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine)
-$started = Get-Date
-$proc = Start-Process -FilePath $sample -ArgumentList $argString -PassThru -WorkingDirectory 'C:\\RevLab\\Output'
-$timedOut = -not $proc.WaitForExit({timeout_ms})
-if ($timedOut) {{
-  Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-  $exitCode = 'timeout'
-}} else {{ $exitCode = $proc.ExitCode }}
-Start-Sleep -Milliseconds 500
-$after = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine)
-$result = [ordered]@{{
-  ok = $true
-  executed = $true
-  execution_status = if ($timedOut) {{ 'timeout' }} else {{ 'completed' }}
-  returncode = $exitCode
-  ran_seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
-  processes_before = $before
-  processes_after = $after
-}}
-$result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'dynamic.json') -Encoding UTF8
-shutdown.exe /s /t 0 /f
-"""
-        path.write_text(script, encoding="utf-8")
-
-    def run_and_capture(self, host_sample: str, host_result_dir: str,
-                        run_args: str = "", timeout: int | None = None) -> dict:
-        if timeout is not None:
-            self.timeout = max(1, min(int(timeout or self.timeout), 600))
-        sample = Path(host_sample)
-        if not sample.is_file():
-            return {"ok": False, "executed": False, "execution_status": "failed",
-                    "runner": self.backend, "error": f"sample not found: {host_sample}"}
-        root = Path(host_result_dir) / f"windows_sandbox_{uuid.uuid4().hex[:12]}"
-        input_dir = root / "input"
-        output_dir = root / "output"
-        input_dir.mkdir(parents=True, exist_ok=True)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        guest_sample = r"C:\RevLab\Input\sample.exe"
-        try:
-            shutil.copy2(sample, input_dir / "sample.exe")
-            self._write_guest_script(output_dir / "run.ps1", guest_sample, run_args)
-            config_xml = ET.Element("Configuration")
-            ET.SubElement(config_xml, "Networking").text = "Disable"
-            folders = ET.SubElement(config_xml, "MappedFolders")
-            for host, guest, read_only in (
-                (input_dir, r"C:\RevLab\Input", "true"),
-                (output_dir, r"C:\RevLab\Output", "false"),
-            ):
-                folder = ET.SubElement(folders, "MappedFolder")
-                ET.SubElement(folder, "HostFolder").text = str(host.resolve())
-                ET.SubElement(folder, "SandboxFolder").text = guest
-                ET.SubElement(folder, "ReadOnly").text = read_only
-            command = ET.SubElement(config_xml, "LogonCommand")
-            ET.SubElement(command, "Command").text = (
-                r"powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass "
-                r"-File C:\RevLab\Output\run.ps1"
-            )
-            wsb = root / "run.wsb"
-            ET.ElementTree(config_xml).write(wsb, encoding="utf-8", xml_declaration=True)
-            process = subprocess.Popen(
-                [str(self.executable), str(wsb)], stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            deadline = time.time() + self.timeout + 45
-            while time.time() < deadline and not (output_dir / "dynamic.json").exists():
-                if process.poll() is not None and not (output_dir / "dynamic.json").exists():
-                    break
-                time.sleep(0.25)
-            if process.poll() is None:
-                process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-            result_path = output_dir / "dynamic.json"
-            if not result_path.exists():
-                return {"ok": False, "executed": False,
-                        "execution_status": "failed", "runner": self.backend,
-                        "error": "Windows Sandbox exited without a result",
-                        "artifact_dir": str(root)}
-            result = json.loads(result_path.read_text(encoding="utf-8-sig"))
-            result.update({"runner": self.backend, "artifact_dir": str(root)})
-            return result
-        except Exception as exc:
-            return {"ok": False, "executed": False, "execution_status": "failed",
-                    "runner": self.backend, "error": str(exc),
-                    "artifact_dir": str(root)}
-
-
-class VMSandbox:
-    """VMware 沙箱:快照回滚 → 拷贝样本 → 运行 → 回拷结果。"""
-
-    def __init__(self, vmx: str, snapshot: str, guest_path: str,
-                 vm_user: str = "", vm_pass: str = ""):
-        self.vmx = vmx
-        self.snapshot = snapshot
-        self.guest_path = guest_path
-        self.cred = (["-gu", vm_user, "-gp", vm_pass] if vm_user else [])
-        if not Path(config.VMWARE_RUN).exists():
-            raise SandboxError(f"vmrun not found: {config.VMWARE_RUN}")
-
-    def revert(self) -> bool:
-        rc, so, se = _run([config.VMWARE_RUN, "revertToSnapshot", self.vmx, self.snapshot], timeout=300)
-        return rc == 0
-
-    def ensure_power(self) -> bool:
-        rc, so, se = _run([config.VMWARE_RUN, "start", self.vmx], timeout=300)
-        return rc == 0 or "already" in (so + se).lower()
-
-    def wait_guest(self, retries: int = 60) -> bool:
-        for _ in range(retries):
-            rc, _, _ = _run([config.VMWARE_RUN, "checkToolsState", self.vmx], timeout=60)
-            if rc == 0:
-                return True
-            time.sleep(5)
-        return False
-
-    def copy_in(self, host: str) -> bool:
-        rc, _, _ = _run([config.VMWARE_RUN, *self.cred, "copyFileFromHostToGuest",
-                         self.vmx, host, self.guest_path], timeout=300)
-        return rc == 0
-
-    def run_guest(self, args: str = "", timeout: int = 120) -> dict:
-        cmd = [config.VMWARE_RUN, *self.cred, "runProgramInGuest", self.vmx,
-               "-activeWindow", f"{self.guest_path} {args}".strip()]
-        rc, so, se = _run(cmd, timeout=timeout)
-        return {"ok": rc == 0, "rc": rc, "out": so, "err": se}
-
-    def copy_out(self, guest: str, host: str) -> bool:
-        rc, _, _ = _run([config.VMWARE_RUN, *self.cred, "copyFileFromGuestToHost",
-                         self.vmx, guest, host], timeout=300)
-        return rc == 0
-
-    def run_and_capture(self, host_sample: str, host_result_dir: str,
-                        run_args: str = "", timeout: int = 120) -> dict:
-        """完整流程:回滚 → 运行 → 回拷转储产物。"""
-        host_result_dir = Path(host_result_dir)
-        host_result_dir.mkdir(parents=True, exist_ok=True)
-        if not self.revert():
-            return {"ok": False, "error": "revert failed"}
-        if not self.ensure_power():
-            return {"ok": False, "error": "start failed"}
-        if not self.wait_guest():
-            return {"ok": False, "error": "guest tools not ready"}
-        if not self.copy_in(host_sample):
-            return {"ok": False, "error": "copy in failed"}
-        run = self.run_guest(run_args, timeout=timeout)
-        return {"ok": run["ok"], "run": run, "collected": []}
 
 
 def _kill_tree(pid: int):
@@ -526,116 +235,50 @@ def _kill_tree(pid: int):
             pass
 
 
-def vm_configured() -> bool:
-    """Return whether an explicitly selected VMware snapshot is usable."""
-    return bool(
-        config.USE_SANDBOX_VM
-        and config.VM_SNAPSHOT
-        and os.environ.get("REVLAB_VM_VMX", "")
-        and Path(config.VMWARE_RUN).exists()
-    )
-
-
-def windows_sandbox_available() -> bool:
-    return os.name == "nt" and Path(config.WINDOWS_SANDBOX_EXE).exists()
-
-
-def sandboxie_available() -> bool:
-    return os.name == "nt" and _sandboxie_start_path() is not None
-
-
 def sandbox_capabilities() -> dict:
-    """Describe safe dynamic backends without starting any process."""
-    vm = vm_configured()
-    si = sandboxie_available()
-    ws = windows_sandbox_available()
-    host = bool(config.ALLOW_HOST_EXECUTION)
-    requested = str(config.DYNAMIC_BACKEND or "auto").lower()
-    if requested in {"quick", "isolated", "sandboxie-plus", "sandboxie"}:
-        requested = "sandboxie"
-    elif requested in {"windows-sandbox"}:
-        requested = "windows_sandbox"
-    if requested == "auto":
-        # VMware is intentionally manual-only. Merely finding a VM must not
-        # power it on or surprise the user with a long boot.
-        selected = "sandboxie" if si else ("windows_sandbox" if ws else "blocked")
-    elif requested == "host":
-        selected = "host" if host else "blocked"
-    elif requested == "vmware":
-        selected = "vmware" if vm else "blocked"
-    elif requested == "windows_sandbox":
-        selected = "windows_sandbox" if ws else "blocked"
-    elif requested == "sandboxie":
-        selected = "sandboxie" if si else "blocked"
+    """Describe the only supported dynamic backend without running a sample."""
+    requested = str(config.DYNAMIC_BACKEND or "local").strip().lower()
+    if requested in {"auto", "host", "local", "native"}:
+        requested = "local"
     else:
-        selected = "blocked"
+        requested = "local"
     return {
         "requested": requested,
-        "selected": selected,
-        "host_execution_allowed": host,
+        "selected": "local",
+        "host_execution_allowed": False,
+        "requires_confirmation": True,
         "backends": {
-            "sandboxie": {"available": si, "network": "sandbox_policy", "gui": False,
-                          "path": str(_sandboxie_start_path() or "")},
-            "windows_sandbox": {"available": ws, "network": "disabled", "gui": False},
-            "vmware": {"available": vm, "network": "depends_on_vmx", "gui": False,
-                       "manual_only": True},
-            "host": {"available": host, "requires_confirmation": not host,
-                     "network": "host_network", "gui": False},
+            "local": {"available": True, "network": "host_network",
+                      "gui": False, "requires_confirmation": True,
+                      "description": "本机受控执行，超时终止进程树"},
+            "sandboxie": {"available": False, "disabled": True,
+                          "reason": "已禁用第三方沙箱后端"},
+            "windows_sandbox": {"available": False, "disabled": True,
+                                 "reason": "已禁用虚拟化沙箱后端"},
+            "vmware": {"available": False, "disabled": True,
+                       "reason": "已禁用虚拟机后端"},
         },
-        "message": (
-            "Sandboxie-Plus 轻量隔离"
-            if selected == "sandboxie" else
-            "短时 Windows Sandbox"
-            if selected == "windows_sandbox" else
-            "已配置的 VMware 快照"
-            if selected == "vmware" else
-            "明确允许的宿主机执行"
-            if selected == "host" else
-            "没有可用的隔离动态后端；未执行样本"
-        ),
+        "message": "本机受控执行；每次开始前都需要用户确认",
     }
 
 
 def create_sandbox(mode: str = "", timeout: int | None = None,
-                   confirm_host_execution: bool = False) -> object:
-    """Create the explicitly selected safe runner; fail closed otherwise."""
+                   confirm_host_execution: bool = False,
+                   confirm_local_execution: bool | None = None) -> object:
+    """Create the local runner after an explicit per-run confirmation.
+
+    ``confirm_host_execution`` is accepted as a compatibility alias for older
+    saved workflows. It never means that a VM or third-party sandbox is used.
+    """
     requested = str(mode or config.DYNAMIC_BACKEND or "auto").strip().lower()
-    if requested in {"quick", "isolated", "sandboxie-plus", "sandboxie"}:
-        requested = "sandboxie"
-    elif requested in {"windows-sandbox"}:
-        requested = "windows_sandbox"
-    if requested == "auto":
-        requested = sandbox_capabilities()["selected"]
+    if requested in {"auto", "host", "local", "native"}:
+        requested = "local"
+    confirmed = bool(confirm_host_execution)
+    if confirm_local_execution is not None:
+        confirmed = bool(confirm_local_execution)
     run_timeout = int(timeout or config.SANDBOX_TIMEOUT)
-    if requested == "sandboxie":
-        if not sandboxie_available():
-            raise SandboxError(
-                "Sandboxie-Plus is unavailable; install it or choose another backend"
-            )
-        return SandboxieRunner(timeout=run_timeout)
-    if requested == "windows_sandbox":
-        if not windows_sandbox_available():
-            raise SandboxError(
-                "Windows Sandbox is unavailable; enable Containers-DisposableClientVM "
-                "or select a configured isolated backend"
-            )
-        return WindowsSandbox(timeout=run_timeout)
-    if requested == "vmware":
-        if not vm_configured():
-            raise SandboxError(
-                "VMware backend is not configured; set REVLAB_SANDBOX_VM=1, "
-                "REVLAB_VM_VMX and REVLAB_VM_SNAPSHOT"
-            )
-        return VMSandbox(os.environ["REVLAB_VM_VMX"], config.VM_SNAPSHOT, config.VM_GUEST_PATH)
-    if requested == "host":
-        # A direct request may carry a one-shot user confirmation.  The AI
-        # tool loop never sets this flag, so it cannot silently escape the
-        # isolated backends.  The environment switch remains the convenient
-        # opt-in for a dedicated lab machine.
-        if not config.ALLOW_HOST_EXECUTION and not confirm_host_execution:
-            raise SandboxError(
-                "Host execution requires explicit per-run confirmation; use an isolated "
-                "backend or confirm_host_execution=true in a deliberate lab run"
-            )
-        return LocalSandbox(timeout=run_timeout)
-    raise SandboxError("No isolated dynamic backend is available; sample was not executed")
+    if requested != "local":
+        raise SandboxError("仅支持本机动态执行；沙箱、虚拟机后端已禁用")
+    if not confirmed:
+        raise SandboxError("本机执行需要本次明确确认；未启动样本")
+    return LocalSandbox(timeout=run_timeout)

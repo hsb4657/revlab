@@ -311,6 +311,15 @@ export async function runWorkflow() {
     const rv = store.runtimeVals[v.key]
     if (v.key && rv !== undefined && rv !== '') vals[v.key] = rv
   }
+  const hasDynamic = store.nodes.some((node) => node.data?.nodeType === 'dynamic_analyze')
+  const confirmLocal = hasDynamic && window.confirm(
+    '此图工作流包含本机动态执行。是否确认本次在当前主机运行样本？\n\n'
+    + '本机执行会使用当前用户权限、文件系统和网络，超时后才会终止进程。'
+  )
+  if (hasDynamic && !confirmLocal) {
+    toast('已取消：未确认本机动态执行', 'info')
+    return
+  }
   const r = await api.createTask(id, {
     name: `${store.wfName}#${Date.now().toString().slice(-6)}`,
     variables: vals,
@@ -321,7 +330,7 @@ export async function runWorkflow() {
   for (const vn of store.nodes) { vn.data.status = 'pending'; vn.data.outputs = null; vn.data.error = '' }
   store.currentTask = null
   store.output = null
-  await api.runTask(id, tid)
+  await api.runTask(id, tid, confirmLocal)
   notifyHost('workflow-task-status', { id: tid, status: 'running' })
   startPolling(tid)
   await refreshTasks()
