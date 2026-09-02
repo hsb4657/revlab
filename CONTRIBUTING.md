@@ -6,6 +6,8 @@ REVLab 目前主要在 Windows 上开发和测试。提交代码前，先完成�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -Verify
 ```
 
+提交改动前请阅读仓库根目录的 [免责声明与使用边界](DISCLAIMER.md)。贡献者不得把测试样本、凭据、个人信息或未经授权的第三方代码加入仓库，也不得为了演示效果而绕过动态执行策略或把候选结果标成已确认。
+
 ## 改动范围
 
 尽量让一个提交只解决一个问题，并在提交说明或 PR 中写清楚影响了哪个页面、接口、分析阶段或节点。
