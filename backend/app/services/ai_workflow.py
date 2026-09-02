@@ -882,7 +882,8 @@ def _pe_rule_workflow() -> dict:
             _node("unpack", "Unpack and verify artifact", "unpack", {}, 1050, 0),
             _node("disassemble", "Disassemble entry point", "disassemble", {"max_insns": 3000}, 1320, 120),
             _node("decompile", "Ghidra decompilation", "decompile", {"max_functions": 200}, 1590, 120),
-            _node("report", "Evidence report", "report", {"title": "AI PE analysis report"}, 1860, 120),
+            _node("pe_ai_assist", "PE AI evidence review", "pe_ai_assist", {"sample_path": "{{sample_path}}", "on_fail": "external_wait"}, 1860, 20),
+            _node("report", "Evidence report", "report", {"title": "AI PE analysis report"}, 2130, 120),
         ],
         "edges": [
             _edge("e_start_pe", "start", "pe_identify"),
@@ -893,7 +894,8 @@ def _pe_rule_workflow() -> dict:
             _edge("e_gate_disasm", "packed_gate", "disassemble", is_default=True),
             _edge("e_unpack_disasm", "unpack", "disassemble"),
             _edge("e_disasm_decompile", "disassemble", "decompile"),
-            _edge("e_decompile_report", "decompile", "report"),
+            _edge("e_decompile_ai", "decompile", "pe_ai_assist"),
+            _edge("e_ai_report", "pe_ai_assist", "report"),
             _edge("e_strings_report", "strings", "report"),
         ],
         "variables": [
@@ -918,7 +920,7 @@ def _ue_rule_workflow() -> dict:
                 "script": "print('<script_out>Encryption signals recorded. Supply a matching runtime memory dump for decryption validation.</script_out>')",
             }, 1080, 0),
             _node("ue_ai_assist", "UE AI resolution: precise globals / GetName / decryption", "ue_ai_assist", {
-                "sample_path": "{{sample_path}}", "on_fail": "skip",
+                "sample_path": "{{sample_path}}", "on_fail": "external_wait",
             }, 1080, 240),
             _node("decompile", "Ghidra function review", "decompile", {"max_functions": 200}, 1340, 120),
             _node("report", "UE evidence report", "report", {"title": "AI UE analysis report"}, 1610, 120),
@@ -961,8 +963,11 @@ def _unity_rule_workflow() -> dict:
                 "lang": "python",
                 "script": "print('<script_out>Metadata encryption state and decryption artifact are recorded for SDK generation.</script_out>')",
             }, 860, 20),
+            _node("unity_ai_assist", "Unity AI evidence review", "unity_ai_assist", {
+                "target_path": "{{target_path}}", "on_fail": "external_wait",
+            }, 1420, 20),
             _node("sdk_dump", "IL2CPP SDK delivery", "sdk_dump", {"target_path": "{{unity_analyze.target_path}}"}, 1140, 120),
-            _node("report", "Unity evidence report", "report", {"title": "AI Unity analysis report"}, 1420, 120),
+            _node("report", "Unity evidence report", "report", {"title": "AI Unity analysis report"}, 1690, 120),
         ],
         "edges": [
             _edge("e_start_unity", "start", "unity_analyze"),
@@ -970,7 +975,8 @@ def _unity_rule_workflow() -> dict:
             _edge("e_gate_trace", "metadata_gate", "decrypt_trace", condition="{{unity_analyze.metadata_encrypted}} == true"),
             _edge("e_gate_sdk", "metadata_gate", "sdk_dump", is_default=True),
             _edge("e_trace_sdk", "decrypt_trace", "sdk_dump"),
-            _edge("e_sdk_report", "sdk_dump", "report"),
+            _edge("e_sdk_ai", "sdk_dump", "unity_ai_assist"),
+            _edge("e_ai_report", "unity_ai_assist", "report"),
         ],
         "variables": [
             {"key": "target_path", "name": "Unity game directory", "type": "text", "default": "", "required": True,
@@ -1007,6 +1013,9 @@ def _generation_messages(prompt: str, sample: dict | None) -> list[dict]:
         "outgoing edge, and a final report node. Every condition node must have exactly one default outgoing edge; "
         "all other outgoing edges need a valid expression such as {{packer_detect.packed}} == true. "
         "Use an explicit branch when encryption/protection/metadata state changes the next analysis step. "
+        "For PE, Unreal, or Unity reverse-analysis requests, include the matching AI assist node after the "
+        "evidence-producing stages and connect it to the final report unless the user explicitly requests "
+        "a static-only workflow. Set its on_fail policy to external_wait so AI is never silently omitted. "
         "The user will continue editing the graph, so preserve clear labels, meaningful variables, and expandable layout."
     )
     user = f"User workflow request:\n{prompt}\n\nOptional sample context:\n{sample_text}"

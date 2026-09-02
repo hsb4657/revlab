@@ -9,8 +9,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services import report as report_svc
+from app.services import ai as ai_svc
 from app.services.ue import ai_assist
 from app.services.ue.analyzer import UEAnalyzer
+from app.services import ai_agent
+from app.workflow_engine.nodes import ai as ai_nodes
 from app.workflow_engine.nodes.base import get_node_class, list_node_types
 
 
@@ -29,6 +32,85 @@ class AINodeRegistryTests(unittest.TestCase):
         self.assertIn("output_mode", prompt_keys)
         ue_keys = {field["key"] for field in by_type["ue_ai_assist"]["params_schema"]}
         self.assertIn("sample_path", ue_keys)
+
+
+class AIEvidenceEnvelopeTests(unittest.TestCase):
+    def test_pe_evidence_retains_differentiating_static_fields_and_dynamic_boundary(self):
+        pool = {
+            "pe_identify": {"sample_path": "x.exe", "pe": {
+                "is_pe": True, "machine": "x64", "sections": [
+                    {"name": ".text", "entropy": 6.2, "raw_size": 1234, "suspicious": False}],
+                "imports": [{"dll": "KERNEL32.dll", "functions": [{"name": "CreateFileW"}]}],
+                "exports": [{"name": "Entry", "address": "0x1000"}],
+                "entry_point": "0x140001000", "image_base": "0x140000000",
+            }},
+            "packer_detect": {"verdict": "unknown", "confidence": 42},
+            "disassemble": {"count": 2, "insns": [{"address": "0x140001000", "mnemonic": "jmp"}]},
+            "decompile": {"ok": True, "function_count": 1,
+                          "functions": [{"address": "0x140001000", "name": "main", "c": "return 0;"}]},
+        }
+        evidence = ai_nodes._pe_ai_evidence(pool)
+        self.assertEqual(evidence["schema"], ai_svc.EVIDENCE_SCHEMA)
+        self.assertEqual(evidence["sample_type"], "PE")
+        self.assertEqual(evidence["imports"][0]["functions"], ["CreateFileW"])
+        self.assertEqual(evidence["sections"][0]["name"], ".text")
+        self.assertEqual(evidence["dynamic"]["execution_status"], "not_collected")
+        self.assertEqual(evidence["sources"]["dynamic_observation"]["evidence_level"], "blocked")
+
+    def test_unity_evidence_keeps_mono_and_il2cpp_statuses(self):
+        evidence = ai_nodes._unity_ai_evidence({
+            "unity_scan": {"target_path": "game", "build_type": "Mono", "unity_version": "2021.3"},
+            "unity_assembly": {"mode": "Mono", "managed_assemblies": [{"name": "Assembly-CSharp.dll"}]},
+            "unity_metadata_candidates": {"status": "metadata_missing", "candidate_count": 0},
+            "unity_metadata": {"metadata_status": "not_applicable"},
+            "sdk_dump": {"status": "not_applicable", "delivery_complete": False},
+        })
+        self.assertEqual(evidence["sample_type"], "Unity")
+        self.assertEqual(evidence["build"]["build_type"], "Mono")
+        self.assertEqual(evidence["metadata"]["metadata_status"], "not_applicable")
+        self.assertEqual(evidence["dynamic_status"], "not_collected")
+
+    def test_sample_context_marks_unexecuted_dynamic_stage_as_blocked(self):
+        sample = {"file_name": "a.exe", "file_size": 10, "summary": {
+            "pe": {"is_pe": True}, "dynamic": {"executed": False, "execution_status": "blocked_by_policy"}}}
+        context = ai_svc.build_sample_ai_evidence(sample)
+        dynamic = context["sources"]["dynamic_observation"]
+        self.assertEqual(dynamic["evidence_level"], "blocked")
+        self.assertEqual(dynamic["data"]["execution_status"], "blocked_by_policy")
+
+    def test_tool_agent_executes_sample_tool_and_returns_trace(self):
+        sample = Path(__file__).resolve().parents[2] / "samples" / "revlab_sample.exe"
+        if not sample.exists():
+            self.skipTest("demo sample missing")
+        responses = [
+            {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call-1", "type": "function",
+                 "function": {"name": "pe_get_info", "arguments": "{}"}}
+            ]}}]},
+            {"choices": [{"message": {"role": "assistant", "content": json.dumps({
+                "summary": "sample inspected", "claims": [], "evidence_refs": ["pe_get_info"],
+                "uncertainties": [], "next_steps": [], "runtime_hypotheses": []
+            })}}]},
+        ]
+        cfg = {"enabled": True, "base_url": "http://fake/v1", "api_key": "x", "model": "m"}
+        with patch.object(ai_agent.ai, "chat_completion", side_effect=responses):
+            out = ai_agent.run_analysis_agent("PE", str(sample), cfg, max_rounds=3)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(len(out["tool_trace"]), 1)
+        self.assertEqual(out["tool_trace"][0]["tool"], "pe_get_info")
+        self.assertIn("pe_get_info", out["response"])
+
+    def test_tool_agent_falls_back_when_provider_rejects_tools(self):
+        sample = Path(__file__).resolve().parents[2] / "samples" / "revlab_sample.exe"
+        if not sample.exists():
+            self.skipTest("demo sample missing")
+        cfg = {"enabled": True, "base_url": "http://fake/v1", "api_key": "x", "model": "m"}
+        with patch.object(ai_agent.ai, "chat_completion", side_effect=RuntimeError("tools unsupported")), \
+             patch.object(ai_agent.ai, "chat", return_value='{"summary":"fallback"}'):
+            out = ai_agent.run_analysis_agent("PE", str(sample), cfg, max_rounds=2)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["tool_mode"], "unsupported_fallback")
+        self.assertIn("fallback", out["response"])
 
 
 class UEAssistNormalizationTests(unittest.TestCase):

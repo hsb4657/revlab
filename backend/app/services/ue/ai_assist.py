@@ -229,6 +229,36 @@ def build_ue_evidence(result: dict, data: bytes, pe: dict) -> dict:
         "version_layout": _limit(version_layout, max_len=800),
         "static_limitations": (result.get("runtime_validation") or {}).get("static_limitations", []),
     }
+    # Wrap the UE-specific contract in the same traceable envelope used by PE
+    # and Unity.  Keep the historical top-level keys above for report/MCP
+    # compatibility, while recording the runtime boundary explicitly.
+    runtime = result.get("runtime_validation") or {
+        "analysis_mode": "static_dump_only",
+        "evidence_status": "not_collected",
+        "execution_available": False,
+        "requires_runtime_execution": True,
+        "reason": "UE dump 未加载到进程，无法观察对象内存或运行时解密。",
+    }
+    envelope = ai_svc.build_evidence_bundle(
+        "UE",
+        {
+            "ue_static": evidence,
+            "runtime_validation": runtime,
+        },
+        extra={
+            "engine_version": evidence.get("engine_version"),
+            "engine_family": evidence.get("engine_family"),
+            "image_base": evidence.get("image_base"),
+            "dynamic_status": runtime.get("evidence_status", "not_collected"),
+        },
+    )
+    envelope.update(evidence)
+    envelope["runtime_validation"] = _limit(runtime, max_len=1200)
+    envelope["redaction_notes"] = [
+        "候选 RVA 和静态反汇编已限量；绝对 VA 只有在同构建加载基址一致时才有意义。",
+        "三大件、FName 算法和解密状态仍需运行时对象/明文校验才能升级为 confirmed。",
+    ]
+    evidence = envelope
     return evidence
 
 
@@ -260,6 +290,11 @@ def normalize_ue_assist(raw: Any, image_base: int | None = None) -> dict:
         rva = _parse_int_address(item.get("rva") or item.get("address"))
         item_base = _parse_int_address(item.get("image_base"))
         base = item_base if item_base is not None else image_base
+        state = str(item.get("validation_state") or "ai_inferred").lower()
+        # A model cannot promote a static candidate to a confirmed runtime
+        # address.  Confirmation is reserved for a separate observation node.
+        if state == "confirmed" or state not in {"candidate", "unconfirmed", "needs_runtime", "ai_inferred"}:
+            state = "ai_inferred"
         norm_three[key] = {
             "rva": rva,
             "rva_hex": _to_hex(rva),
@@ -267,6 +302,7 @@ def normalize_ue_assist(raw: Any, image_base: int | None = None) -> dict:
             "absolute_va_hex": _to_hex((base + rva) if (base is not None and rva is not None) else None),
             "confidence": item.get("confidence"),
             "reason": str(item.get("reason") or "")[:2000],
+            "validation_state": state,
         }
     gna = raw.get("getname_algorithm") or {}
     if not isinstance(gna, dict):
@@ -278,6 +314,8 @@ def normalize_ue_assist(raw: Any, image_base: int | None = None) -> dict:
     if not isinstance(notes, list):
         notes = [str(notes)]
     return {
+        "evidence_level": "ai_inferred",
+        "validation_state": "ai_inferred",
         "three_majors": norm_three,
         "getname_algorithm": {
             "model": str(gna.get("model") or "")[:64],
@@ -315,13 +353,9 @@ _UE_SYSTEM_PROMPT = (
     "key). If decryption is required, derive the concrete algorithm and key from the evidence; "
     "otherwise set detected=false. Never invent memory values that are not supported by evidence. "
     "\n\n"
-    "IMPORTANT: You SHOULD search the internet for information, especially:\n"
-    "- Search for UE source code matching the detected engine version (e.g. 'UE 5.5 FNamePool source')\n"
-    "- Look up FNamePool, FUObjectArray, GNames, GObjects structure definitions in the UE source\n"
-    "- Check if the UE version has known FName encryption or IndexToName changes\n"
-    "- Search for UE dumper projects (Dumper-7, UE4SS, UnrealDumper) for reference implementations\n"
-    "- Look up the game title if recognizable to find community reverse-engineering findings\n"
-    "Use the UE source code structure definitions to validate your address candidates and algorithm. "
+    "IMPORTANT: If an external retrieval tool is available, you may consult UE source or dumper references; "
+    "otherwise do not claim that an internet search was performed. Local sample evidence remains authoritative. "
+    "Use source definitions only as a cross-check and never as a substitute for build-matched runtime validation. "
     "Respond with exactly one JSON object, no prose or markdown fences."
 )
 

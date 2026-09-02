@@ -40,6 +40,15 @@ def _external_ai_decision(pool: dict, node_id: str) -> dict | None:
     return None
 
 
+def _ai_result_metadata(outputs: dict, source: str) -> dict:
+    """Annotate model decisions without promoting them to confirmed facts."""
+    result = dict(outputs or {})
+    result.setdefault("source", source)
+    result.setdefault("evidence_level", "ai_inferred")
+    result.setdefault("validation_state", "ai_inferred")
+    return result
+
+
 def _chat_json(cfg: dict, messages: list, max_tokens: int = 2000) -> dict:
     from ...services import ai as ai_svc
     reply = ai_svc.chat(cfg, messages)
@@ -68,6 +77,151 @@ def _extract_json_object(content: str) -> dict | None:
 
 def _prompt_params(ctx: dict) -> dict:
     return dict(ctx.get("params") or {})
+
+
+def _bounded(value, *, depth: int = 0, max_depth: int = 4,
+             max_items: int = 40, max_string: int = 1800):
+    """Keep AI prompts sample-specific without embedding entire stage blobs."""
+    from ...services import ai as ai_svc
+    return ai_svc._limit_value(value, depth=depth, max_depth=max_depth,
+                               max_items=max_items, max_string=max_string)
+
+
+def _pe_ai_evidence(pool: dict) -> dict:
+    """Build a bounded PE evidence map while retaining differentiating fields."""
+    identified = pool.get("pe_identify", {}) or {}
+    pe = identified.get("pe") if isinstance(identified, dict) else {}
+    pe = pe if isinstance(pe, dict) else identified if isinstance(identified, dict) else {}
+
+    sections = []
+    for item in pe.get("sections", identified.get("sections", []) if isinstance(identified, dict) else []) or []:
+        if not isinstance(item, dict):
+            continue
+        sections.append({key: item.get(key) for key in (
+            "name", "virtual_address", "virtual_size", "raw_ptr", "raw_size",
+            "characteristics", "entropy", "suspicious") if key in item})
+
+    imports = []
+    for item in (pe.get("imports", identified.get("imports", []) if isinstance(identified, dict) else []) or [])[:80]:
+        if not isinstance(item, dict):
+            continue
+        funcs = item.get("functions") or item.get("imports") or []
+        names = []
+        for fn in funcs[:48]:
+            name = fn.get("name") if isinstance(fn, dict) else fn
+            if name:
+                names.append(str(name))
+        imports.append({"dll": item.get("dll") or item.get("name") or "", "functions": names})
+
+    strings = pool.get("strings", {}) or {}
+    if isinstance(strings, list):
+        strings = {"count": len(strings), "strings": strings}
+    decompile = pool.get("decompile", {}) or {}
+    functions = []
+    if isinstance(decompile, dict):
+        for fn in (decompile.get("functions") or [])[:40]:
+            if not isinstance(fn, dict):
+                continue
+            functions.append({key: fn.get(key) for key in ("address", "name", "signature", "c") if key in fn})
+    dynamic = pool.get("dynamic", {}) or {}
+    # DynamicAnalyzeNode nests local observations under result; expose both
+    # the execution decision and the bounded observation payload.
+    dynamic_result = dynamic.get("result") if isinstance(dynamic, dict) else {}
+    dynamic_status = dynamic.get("execution_status") if isinstance(dynamic, dict) else None
+    if not dynamic_status and isinstance(dynamic_result, dict):
+        dynamic_status = dynamic_result.get("execution_status") or dynamic_result.get("status")
+    if not dynamic:
+        dynamic = {"execution_status": "not_collected", "executed": False,
+                   "reason": "工作流未包含动态阶段或该阶段尚未运行"}
+
+    packer = (pool.get("packer_detect", {}) or pe.get("packer", {}) or
+              (identified.get("packer", {}) if isinstance(identified, dict) else {}))
+    sources = {
+        "pe_identify": {
+            key: pe.get(key) for key in (
+                "is_pe", "machine", "is_64bit", "subsystem", "entry_point", "image_base",
+                "image_size", "timestamp", "checksum", "security", "debug", "signature",
+                "rich_header", "data_directories", "tls_callbacks") if key in pe
+        },
+        "sections_static": sections,
+        "imports_static": imports,
+        "exports_static": (pe.get("exports", identified.get("exports", []) if isinstance(identified, dict) else []) or [])[:48],
+        "packer_static": packer,
+        "protection_matrix": pool.get("pe_protection_matrix", {}) or {},
+        "unpack_strategy": pool.get("pe_unpack_strategy", {}) or {},
+        "strings_static": {"count": strings.get("count", len(strings.get("strings", [])) if isinstance(strings, dict) else 0),
+                            "items": (strings.get("strings") or strings.get("interesting") or [])[:120]
+                            if isinstance(strings, dict) else []},
+        "disassembly_static": pool.get("disassemble", {}) or {},
+        "decompile_static": {"ok": decompile.get("ok"), "available": decompile.get("available"),
+                             "function_count": decompile.get("function_count"), "functions": functions},
+        "dynamic_observation": dynamic,
+    }
+    from ...services import ai as ai_svc
+    bundle = ai_svc.build_evidence_bundle(
+        "PE", sources,
+        extra={"dynamic_status": dynamic_status or "not_collected",
+               "sample_path": identified.get("sample_path", "") if isinstance(identified, dict) else ""},
+    )
+    # Keep stage names at the top level for external MCP clients and old
+    # workflows, while `sources` remains the canonical traceable envelope.
+    bundle.update({"pe": _bounded(sources["pe_identify"]),
+                   "sections": _bounded(sections), "imports": _bounded(imports),
+                   "exports": _bounded(sources["exports_static"]),
+                   "packer": _bounded(packer), "strings": _bounded(sources["strings_static"]),
+                   "disassembly": _bounded(sources["disassembly_static"]),
+                   "decompile": _bounded(sources["decompile_static"]),
+                   "dynamic": _bounded(dynamic)})
+    bundle["redaction_notes"] = [
+        "节区、导入和函数列表已限量；完整产物仍在工作流输出目录。",
+        "dynamic_observation 的 blocked/not_collected 状态表示没有运行时事实。",
+    ]
+    return bundle
+
+
+def _unity_ai_evidence(pool: dict) -> dict:
+    """Build a bounded Unity evidence map for Mono and IL2CPP alike."""
+    source_names = (
+        "unity_scan", "unity_assembly", "unity_metadata_candidates", "unity_loader_analysis",
+        "unity_metadata", "metadata_validation", "sdk_dump", "unity_analyze",
+    )
+    raw = {name: pool.get(name, {}) or {} for name in source_names}
+    compact = {}
+    for name, value in raw.items():
+        if isinstance(value, dict):
+            # Preserve status/paths/counts and bounded nested evidence.  The
+            # complete SDK or scan manifest remains available as an artifact.
+            compact[name] = _bounded(value, max_depth=5, max_items=48, max_string=1600)
+        else:
+            compact[name] = _bounded(value)
+    build = raw.get("unity_scan") or raw.get("unity_analyze") or {}
+    metadata = raw.get("unity_metadata") or raw.get("unity_assembly") or {}
+    dynamic = raw.get("dynamic") or {
+        "execution_status": "not_collected", "executed": False,
+        "reason": "Unity 专项流程未包含运行时执行阶段",
+    }
+    from ...services import ai as ai_svc
+    bundle = ai_svc.build_evidence_bundle(
+        "Unity", compact,
+        extra={
+            "build_type": build.get("build_type") if isinstance(build, dict) else None,
+            "unity_version": build.get("unity_version") if isinstance(build, dict) else None,
+            "metadata_status": metadata.get("metadata_status") if isinstance(metadata, dict) else None,
+            "dynamic_status": dynamic.get("execution_status", "not_collected") if isinstance(dynamic, dict) else "not_collected",
+        },
+    )
+    bundle.update({"build": compact.get("unity_scan", {}),
+                   "assembly": compact.get("unity_assembly", {}),
+                   "metadata_candidates": compact.get("unity_metadata_candidates", {}),
+                   "loader": compact.get("unity_loader_analysis", {}),
+                   "metadata": compact.get("unity_metadata", {}),
+                   "validation": compact.get("metadata_validation", {}),
+                   "sdk": compact.get("sdk_dump", {})})
+    bundle["redaction_notes"] = [
+        "目录扫描、程序集、Metadata 表和 SDK 清单均为有界摘要；完整文件通过产物路径取得。",
+        "Metadata 候选或高熵文件不能单独证明已解密，需结构验证或构建匹配的运行时证据。",
+    ]
+    return bundle
 
 
 def _ai_waiting_node_result(node_id: str, evidence: dict, extra: dict | None = None) -> NodeResult:
@@ -109,6 +263,7 @@ class AIAnalyzeNode(BaseNode):
         {"key": "model", "label": "模型(留空用全局配置)", "type": "text", "default": ""},
         {"key": "reasoning", "label": "思考强度", "type": "select", "default": "balanced",
          "options": ["fast", "balanced", "deep"]},
+        {"key": "max_tool_rounds", "label": "AI 工具轮数上限", "type": "number", "default": 6},
         {"key": "on_fail", "label": "AI 不可用策略", "type": "select", "default": "external_wait",
          "options": ["external_wait", "skip", "abort"],
          "desc": "external_wait:构建证据等待外部 AI; skip:跳过; abort:中止"},
@@ -116,33 +271,40 @@ class AIAnalyzeNode(BaseNode):
 
     async def execute(self, ctx) -> NodeResult:
         from ...services.ai_workflow import apply_session_settings, normalize_reasoning
+        from ...services import ai as ai_svc
         pool = ctx.get("pool") or {}
         node_id = (ctx.get("node") or {}).get("id", "ai_analyze")
         params = _prompt_params(ctx)
         prompt = resolve(str(params.get("prompt", "")), pool)
         if not prompt.strip():
             return NodeResult(status="failed", error="分析指令不能为空")
-
+        # A generic node should still receive the current workflow evidence
+        # when the user asks an open-ended question.  The pool is bounded so a
+        # large decompiler result cannot silently exhaust the model context.
+        evidence = ai_svc.build_evidence_bundle("workflow", pool)
         # 1) 外部 AI 已提交结论
         ext = _external_ai_decision(pool, node_id)
         if ext:
             return NodeResult(
-                outputs={**ext, "source": "external_ai"},
+                outputs=_ai_result_metadata(ext, "external_ai"),
                 summary=ext.get("response", "")[:120].replace("\n", " ") or "外部 AI 结论已应用",
             )
 
         # 2) 内部 AI
         cfg = _load_ai_cfg()
         if _ai_configured(cfg):
+            from ...services.ai_agent import run_analysis_agent
             runtime = apply_session_settings(cfg, str(params.get("model") or ""),
                                              normalize_reasoning(params.get("reasoning", "balanced")))
-            system = str(params.get("system_prompt") or "").strip() or (
-                "You are REVLab's binary-analysis assistant. Analyze the provided data precisely "
-                "and answer in Chinese. If JSON output is requested, return only JSON."
-            )
-            messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+            target = str(pool.get("sample_path") or pool.get("target_path") or "")
             try:
-                out = _chat_json(runtime, messages)
+                agent = run_analysis_agent("workflow", target, runtime, evidence=evidence,
+                                           instruction=prompt,
+                                           system_prompt=str(params.get("system_prompt") or ""),
+                                           max_rounds=int(params.get("max_tool_rounds", 6) or 6))
+                if not agent.get("ok"):
+                    raise RuntimeError(agent.get("error", "AI 工具循环失败"))
+                response = agent.get("response", "")
             except Exception as exc:
                 return NodeResult(
                     status="failed",
@@ -152,16 +314,21 @@ class AIAnalyzeNode(BaseNode):
                 )
             outputs = {
                 "ai_output": True, "configured": True,
-                "response": out["text"][:30000],
-                "model": runtime.get("model", ""),
+                "source": "tool_agent", "evidence_level": "ai_inferred", "validation_state": "ai_inferred",
+                "response": response[:30000],
+                "model": agent.get("model", runtime.get("model", "")),
+                "evidence": evidence,
+                "tool_trace": agent.get("tool_trace", []),
+                "tool_rounds": agent.get("tool_rounds", 0),
+                "tool_mode": agent.get("tool_mode", "native"),
+                "warning": agent.get("warning", ""),
             }
-            if out.get("json") is not None:
-                outputs["json"] = out["json"]
+            parsed = _extract_json_object(response)
+            if parsed is not None:
+                outputs["json"] = parsed
                 outputs["json_ok"] = True
-            if out.get("warning"):
-                outputs["warning"] = out["warning"]
             return NodeResult(outputs=outputs,
-                              summary=out["text"][:120].replace("\n", " ") or "AI 分析完成")
+                              summary=response[:120].replace("\n", " ") or "AI 工具分析完成")
 
         # 3) 都没有 → 等待外部 AI
         if params.get("on_fail") == "skip":
@@ -173,7 +340,7 @@ class AIAnalyzeNode(BaseNode):
         if params.get("on_fail") == "abort":
             return NodeResult(status="failed", error="AI 模型未配置")
         # default: external_wait
-        return _ai_waiting_node_result(node_id, {"prompt": prompt})
+        return _ai_waiting_node_result(node_id, evidence, extra={"prompt": prompt})
 
 
 @register
@@ -188,6 +355,8 @@ class UEAIAssistNode(BaseNode):
     params_schema = [
         {"key": "sample_path", "label": "Dump 后的 EXE 路径", "type": "text", "default": ""},
         {"key": "version", "label": "UE 版本(留空自动识别)", "type": "text", "default": ""},
+        {"key": "max_tool_rounds", "label": "AI 工具轮数上限", "type": "number", "default": 6,
+         "desc": "AI 每轮可调用一个或多个受控分析工具，达到上限后停止"},
         {"key": "on_fail", "label": "AI 不可用策略", "type": "select", "default": "external_wait",
          "options": ["external_wait", "skip", "abort"],
          "desc": "external_wait:构建证据等待外部 AI; skip:跳过; abort:中止"},
@@ -204,8 +373,9 @@ class UEAIAssistNode(BaseNode):
         if ext:
             result, path, error = _ue_analysis_reuse(ctx)
             return NodeResult(
-                outputs={**ext, "sample_path": path or params.get("sample_path", ""),
+                outputs=_ai_result_metadata({**ext, "sample_path": path or params.get("sample_path", ""),
                          "_analysis": result, "source": "external_ai"},
+                         "external_ai"),
                 summary="外部 AI 结论已应用",
             )
 
@@ -225,14 +395,31 @@ class UEAIAssistNode(BaseNode):
         # 3) 内部 AI
         cfg = _load_ai_cfg()
         if _ai_configured(cfg):
+            from ...services.ai_agent import run_analysis_agent
             try:
-                assisted = ue_ai.assist_ue_analysis(evidence, cfg)
+                agent = run_analysis_agent("UE", path, cfg, evidence=evidence,
+                                           max_rounds=int(params.get("max_tool_rounds", 6) or 6))
+                if not agent.get("ok"):
+                    raise RuntimeError(agent.get("error", "AI 工具循环失败"))
+                parsed = _extract_json_object(agent.get("response", "")) or {}
+                assisted = ue_ai.normalize_ue_assist(
+                    parsed, image_base=ue_ai._parse_int_address(evidence.get("image_base")))
+                assisted.update({"raw_response": agent.get("response", "")[:8000],
+                                 "tool_trace": agent.get("tool_trace", []),
+                                 "tool_rounds": agent.get("tool_rounds", 0),
+                                 "tool_mode": agent.get("tool_mode", "native"),
+                                 "warning": agent.get("warning", ""),
+                                 "model": agent.get("model", cfg.get("model", "")),
+                                 "configured": True, "ai_output": True,
+                                 "evidence_level": "ai_inferred", "validation_state": "ai_inferred"})
             except Exception as exc:
                 return NodeResult(
                     status="failed",
                     outputs={"ai_output": True, "configured": True, "error": str(exc),
                              "three_majors": {}, "getname_algorithm": {}, "decryption_algorithm": {},
-                             "evidence": evidence, "_analysis": result, "sample_path": path},
+                             "evidence": evidence, "_analysis": result, "sample_path": path,
+                             "source": "internal_model", "evidence_level": "ai_inferred",
+                             "validation_state": "ai_inferred"},
                     summary=f"UE AI 辅助失败: {str(exc)[:80]}",
                     error=f"UE AI 辅助失败: {exc}",
                 )
@@ -274,11 +461,20 @@ def _ue_assist_success(assisted: dict, evidence: dict, result: dict, path: str) 
     dec_summary = "无需解密" if not da.get("detected") else f"解密: {str(da.get('algorithm') or '')[:60]}"
     summary = " · ".join(summary_parts + [getname_summary, dec_summary]) or "UE AI 辅助分析完成"
     return NodeResult(
-        outputs={
+            outputs={
             "ai_output": True, "configured": True,
-            "three_majors_ai": three, "getname_algorithm": gna,
+            "source": "internal_model", "evidence_level": "ai_inferred",
+            "validation_state": "ai_inferred",
+            # `three_majors` is the report/MCP contract; retain the old
+            # `three_majors_ai` alias for clients that used the early preview.
+            "three_majors": three, "three_majors_ai": three,
+            "getname_algorithm": gna,
             "decryption_algorithm": da, "notes": assisted.get("notes", []),
             "raw_response": assisted.get("raw_response", "")[:30000],
+            "tool_trace": assisted.get("tool_trace", []),
+            "tool_rounds": assisted.get("tool_rounds", 0),
+            "tool_mode": assisted.get("tool_mode", "native"),
+            "warning": assisted.get("warning", ""),
             "model": assisted.get("model", ""), "evidence": evidence,
             "_analysis": result, "sample_path": path,
         },
@@ -302,6 +498,7 @@ class PEAIAssistNode(BaseNode):
     category = "AI 辅助分析"
     params_schema = [
         {"key": "sample_path", "label": "样本路径", "type": "text", "default": ""},
+        {"key": "max_tool_rounds", "label": "AI 工具轮数上限", "type": "number", "default": 6},
         {"key": "on_fail", "label": "AI 不可用策略", "type": "select", "default": "external_wait",
          "options": ["external_wait", "skip", "abort"],
          "desc": "external_wait:构建证据等待外部 AI; skip:跳过; abort:中止"},
@@ -315,48 +512,37 @@ class PEAIAssistNode(BaseNode):
         # 1) 外部 AI 已提交结论
         ext = _external_ai_decision(pool, node_id)
         if ext:
-            return NodeResult(outputs={**ext, "source": "external_ai"},
+            return NodeResult(outputs=_ai_result_metadata(ext, "external_ai"),
                               summary="外部 AI 结论已应用")
 
-        # 2) 构建证据:从变量池收集前序节点输出
-        evidence = {
-            "pe": pool.get("pe_identify", {}),
-            "packer": pool.get("packer_detect", {}),
-            "protection": pool.get("pe_protection_matrix", {}),
-            "unpack_strategy": pool.get("pe_unpack_strategy", {}),
-            "strings": pool.get("strings", {}),
-            "disassembly": pool.get("disassemble", {}),
-            "decompile": pool.get("decompile", {}),
-            "dynamic": pool.get("dynamic", {}),
-        }
-        # 精简证据(去掉大字段)
-        for key in evidence:
-            if isinstance(evidence[key], dict):
-                evidence[key] = {k: v for k, v in evidence[key].items()
-                                 if k not in ("imports", "exports", "sections", "data_directories",
-                                              "resources", "functions") and not str(k).startswith("_")}
+        # 2) 构建证据:按当前样本保留结构差异和动态状态
+        evidence = _pe_ai_evidence(pool)
 
         # 3) 内部 AI
         cfg = _load_ai_cfg()
         if _ai_configured(cfg):
-            from ...services.ai_workflow import apply_session_settings, normalize_reasoning
-            runtime = apply_session_settings(cfg, "", "balanced")
-            system = ("你是资深 Windows PE 逆向工程师。基于给出的静态分析数据,输出中文结论:\n"
-                      "1. 壳/保护判定(真实壳 vs 误报)\n2. 可疑点与恶意行为线索\n"
-                      "3. 逆向分析建议(下一步)\n\n"
-                      "重要:你可以搜索互联网获取信息,如:\n"
-                      "- 搜索样本中出现的 DLL/函数名了解其功能\n"
-                      "- 搜索壳特征确认壳类型\n"
-                      "- 搜索可疑行为模式\n"
-                      "用 JSON 格式输出。")
-            user = f"PE 分析数据:\n{json.dumps(evidence, ensure_ascii=False)[:15000]}"
+            from ...services.ai_agent import run_analysis_agent
             try:
-                out = _chat_json(runtime, [{"role": "system", "content": system},
-                                           {"role": "user", "content": user}])
+                target = str(params.get("sample_path") or pool.get("sample_path") or
+                             (pool.get("pe_identify", {}) or {}).get("sample_path") or "")
+                if target.startswith("{{"):
+                    target = str(pool.get("sample_path") or "")
+                agent = run_analysis_agent("PE", target, cfg,
+                                           evidence=evidence,
+                                           max_rounds=int(params.get("max_tool_rounds", 6) or 6))
+                if not agent.get("ok"):
+                    raise RuntimeError(agent.get("error", "AI 工具循环失败"))
+                response = agent.get("response", "")
                 return NodeResult(
-                    outputs={"ai_output": True, "configured": True, "response": out["text"][:30000],
-                             "json": out.get("json"), "model": runtime.get("model", ""), "evidence": evidence},
-                    summary=out["text"][:120].replace("\n", " ") or "PE AI 分析完成")
+                    outputs={"ai_output": True, "configured": True, "source": "tool_agent",
+                             "evidence_level": "ai_inferred", "validation_state": "ai_inferred",
+                             "response": response[:30000], "json": _extract_json_object(response),
+                             "model": agent.get("model", cfg.get("model", "")),
+                             "tool_trace": agent.get("tool_trace", []),
+                             "tool_rounds": agent.get("tool_rounds", 0),
+                             "tool_mode": agent.get("tool_mode", "native"),
+                             "warning": agent.get("warning", ""), "evidence": evidence},
+                    summary=response[:120].replace("\n", " ") or "PE AI 工具分析完成")
             except Exception as exc:
                 return NodeResult(status="failed",
                                   outputs={"ai_output": True, "configured": True, "error": str(exc), "evidence": evidence},
@@ -383,6 +569,7 @@ class UnityAIAssistNode(BaseNode):
     category = "AI 辅助分析"
     params_schema = [
         {"key": "target_path", "label": "游戏文件夹路径", "type": "text", "default": ""},
+        {"key": "max_tool_rounds", "label": "AI 工具轮数上限", "type": "number", "default": 6},
         {"key": "on_fail", "label": "AI 不可用策略", "type": "select", "default": "external_wait",
          "options": ["external_wait", "skip", "abort"],
          "desc": "external_wait:构建证据等待外部 AI; skip:跳过; abort:中止"},
@@ -396,47 +583,37 @@ class UnityAIAssistNode(BaseNode):
         # 1) 外部 AI 已提交结论
         ext = _external_ai_decision(pool, node_id)
         if ext:
-            return NodeResult(outputs={**ext, "source": "external_ai"},
+            return NodeResult(outputs=_ai_result_metadata(ext, "external_ai"),
                               summary="外部 AI 结论已应用")
 
-        # 2) 构建证据:从变量池收集前序节点输出
-        evidence = {
-            "scan": pool.get("unity_scan", {}),
-            "assembly": pool.get("unity_assembly", {}),
-            "metadata_candidates": pool.get("unity_metadata_candidates", {}),
-            "loader_analysis": pool.get("unity_loader_analysis", {}),
-            "metadata": pool.get("unity_metadata", {}),
-            "metadata_validation": pool.get("metadata_validation", {}),
-            "sdk": pool.get("sdk_dump", {}),
-        }
-        # 精简证据
-        for key in evidence:
-            if isinstance(evidence[key], dict):
-                evidence[key] = {k: v for k, v in evidence[key].items()
-                                 if not str(k).startswith("_") and k not in ("result",)}
+        # 2) 构建证据:同时覆盖 Mono、IL2CPP、Metadata 候选和 SDK 门禁
+        evidence = _unity_ai_evidence(pool)
 
         # 3) 内部 AI
         cfg = _load_ai_cfg()
         if _ai_configured(cfg):
-            from ...services.ai_workflow import apply_session_settings, normalize_reasoning
-            runtime = apply_session_settings(cfg, "", "balanced")
-            system = ("你是资深 Unity/IL2CPP 逆向工程师。基于给出的分析数据,输出中文结论:\n"
-                      "1. 构建类型与版本结论\n2. Metadata 状态与可用性\n"
-                      "3. SDK 完整性评估\n4. 剩余风险与下一步建议\n\n"
-                      "重要:你可以搜索互联网获取信息,如:\n"
-                      "- 搜索检测到的 Unity 版本的 IL2CPP metadata 格式\n"
-                      "- 搜索 global-metadata.dat 结构定义和版本差异\n"
-                      "- 搜索 Unity 游戏的已知保护方案\n"
-                      "- 搜索 Il2CppDumper 等工具的实现参考\n"
-                      "用 JSON 格式输出。")
-            user = f"Unity 分析数据:\n{json.dumps(evidence, ensure_ascii=False)[:15000]}"
+            from ...services.ai_agent import run_analysis_agent
             try:
-                out = _chat_json(runtime, [{"role": "system", "content": system},
-                                           {"role": "user", "content": user}])
+                target = str(params.get("target_path") or pool.get("target_path") or
+                             (pool.get("unity_scan", {}) or {}).get("target_path") or "")
+                if target.startswith("{{"):
+                    target = str(pool.get("target_path") or "")
+                agent = run_analysis_agent("Unity", target, cfg,
+                                           evidence=evidence,
+                                           max_rounds=int(params.get("max_tool_rounds", 6) or 6))
+                if not agent.get("ok"):
+                    raise RuntimeError(agent.get("error", "AI 工具循环失败"))
+                response = agent.get("response", "")
                 return NodeResult(
-                    outputs={"ai_output": True, "configured": True, "response": out["text"][:30000],
-                             "json": out.get("json"), "model": runtime.get("model", ""), "evidence": evidence},
-                    summary=out["text"][:120].replace("\n", " ") or "Unity AI 分析完成")
+                    outputs={"ai_output": True, "configured": True, "source": "tool_agent",
+                             "evidence_level": "ai_inferred", "validation_state": "ai_inferred",
+                             "response": response[:30000], "json": _extract_json_object(response),
+                             "model": agent.get("model", cfg.get("model", "")),
+                             "tool_trace": agent.get("tool_trace", []),
+                             "tool_rounds": agent.get("tool_rounds", 0),
+                             "tool_mode": agent.get("tool_mode", "native"),
+                             "warning": agent.get("warning", ""), "evidence": evidence},
+                    summary=response[:120].replace("\n", " ") or "Unity AI 工具分析完成")
             except Exception as exc:
                 return NodeResult(status="failed",
                                   outputs={"ai_output": True, "configured": True, "error": str(exc), "evidence": evidence},

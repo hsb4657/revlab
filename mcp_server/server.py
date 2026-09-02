@@ -462,6 +462,11 @@ def wf_task_outputs(task_id: int, node_id: str = "") -> str:
                 "summary": (st.get("outputs") or {}).get("__summary", ""),
                 "outputs": _trim({k: v for k, v in (st.get("outputs") or {}).items()
                                   if k not in ("__summary", "evidence", "raw_response")}),
+                # AI_WAITING and AI tool nodes keep their traceable evidence
+                # outside the ordinary scalar outputs.  Expose a bounded copy
+                # here so an external agent can actually continue the task.
+                "evidence": _trim((st.get("outputs") or {}).get("evidence") or {}),
+                "tool_trace": _trim((st.get("outputs") or {}).get("tool_trace") or []),
             }
             for nid, st in states.items()
         },

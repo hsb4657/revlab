@@ -43,16 +43,17 @@ def valid_model_graph() -> dict:
 class WorkflowDraftTests(unittest.TestCase):
     def test_local_rule_generator_covers_pe_ue_unity_with_branches_and_report(self):
         cases = [
-            ("Create a PE packer analysis", "local-rules:pe", "pe_identify"),
-            ("Create an Unreal UE5 GObjects workflow", "local-rules:ue", "ue_analyze"),
-            ("Create a Unity IL2CPP metadata workflow", "local-rules:unity", "unity_analyze"),
+            ("Create a PE packer analysis", "local-rules:pe", "pe_identify", "pe_ai_assist"),
+            ("Create an Unreal UE5 GObjects workflow", "local-rules:ue", "ue_analyze", "ue_ai_assist"),
+            ("Create a Unity IL2CPP metadata workflow", "local-rules:unity", "unity_analyze", "unity_ai_assist"),
         ]
-        for prompt, generator, expected_type in cases:
+        for prompt, generator, expected_type, expected_ai in cases:
             with self.subTest(prompt=prompt):
                 result = ai_workflow.generate_workflow(prompt, cfg={"enabled": False})
                 self.assertEqual(result["generator"], generator)
                 self.assertTrue(result["editable"])
                 self.assertIn(expected_type, [node["type"] for node in result["nodes"]])
+                self.assertIn(expected_ai, [node["type"] for node in result["nodes"]])
                 self.assertIn("condition", [node["type"] for node in result["nodes"]])
                 self.assertIn("report", [node["type"] for node in result["nodes"]])
                 valid, errors = validate_graph(result["nodes"], result["edges"], result["variables"])
