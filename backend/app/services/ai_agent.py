@@ -157,7 +157,9 @@ def _execute_tool(name: str, args: dict, *, kind: str, target: str) -> dict:
             if isinstance(runner, sandbox.VMSandbox):
                 out = runner.run_and_capture(target, str(config.CAPTURES_DIR), config.SANDBOX_RUN_ARGS, timeout)
                 return {"ok": bool(out.get("ok")), "tool": name, "runner": "vmware",
-                        "executed": bool(out.get("ok")), "execution_status": "completed", "result": out}
+                        "executed": bool(out.get("ok")),
+                        "execution_status": "completed" if out.get("ok") else "failed",
+                        "result": out}
             return {"ok": True, "tool": name, "executed": False,
                     "execution_status": "blocked_by_policy",
                     "reason": "当前 sandbox runner 不是隔离 VMware 环境"}
